@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Snore & SAS Monitor Lite (Fixed)</title>
+    <title>Snore & SAS Monitor Lite (Android Fixed)</title>
     <style>
         :root {
             --bg-color: #121212;
@@ -35,6 +35,387 @@
             padding: 14px;
             font-size: 1rem;
             font-weight: bold;
+            border: none;
+            border-radius: 8px;
+            background: var(--accent-green);
+            color: #000;
+            cursor: pointer;
+            margin-bottom: 6px;
+        }
+        .btn-test {
+            background: #333;
+            color: #fff;
+            padding: 10px;
+            font-size: 0.85rem;
+        }
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            text-align: center;
+            margin-top: 8px;
+        }
+        .summary-item {
+            background: #2a2a2a;
+            padding: 8px;
+            border-radius: 8px;
+        }
+        .summary-val {
+            font-size: 1.1rem;
+            font-weight: bold;
+            margin-top: 4px;
+        }
+        canvas {
+            width: 100%;
+            height: 140px;
+            background: #080808;
+            border-radius: 6px;
+            display: block;
+            margin-top: 8px;
+        }
+        .event-item {
+            border-bottom: 1px solid #333;
+            padding: 10px 0;
+        }
+        .event-tag {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: bold;
+            margin-bottom: 4px;
+        }
+        .tag-sas { background: var(--alert-red); color: #fff; }
+        .tag-snore { background: var(--warn-yellow); color: #000; }
+        audio { width: 100%; height: 36px; margin-top: 6px; }
+        .note { font-size: 0.75rem; color: var(--text-sub); text-align: center; }
+    </style>
+</head>
+<body>
+
+    <h1>いびき・SAS 睡眠モニター</h1>
+
+    <div class="card">
+        <button id="toggleBtn" class="btn">計測を開始する</button>
+        <button id="testBtn" class="btn btn-test">動作テスト（15秒切り出し再生）</button>
+        <div id="wakeLockStatus" class="note">スリープ防止: 未設定</div>
+        <div id="mimeStatus" class="note" style="color:#81c784; margin-top:4px;"></div>
+    </div>
+
+    <div class="card">
+        <div style="font-weight: bold; font-size: 0.9rem;">昨夜の計測サマリー</div>
+        <div class="summary-grid">
+            <div class="summary-item">
+                <div style="font-size: 0.75rem; color: var(--text-sub);">危険検知</div>
+                <div id="summaryAlerts" class="summary-val" style="color: var(--alert-red);">0 回</div>
+            </div>
+            <div class="summary-item">
+                <div style="font-size: 0.75rem; color: var(--text-sub);">最長無音</div>
+                <div id="summaryMaxSilence" class="summary-val">0 秒</div>
+            </div>
+            <div class="summary-item">
+                <div style="font-size: 0.75rem; color: var(--text-sub);">いびき率</div>
+                <div id="summarySnoreRatio" class="summary-val">0 %</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div style="display: flex; justify-content: space-between; font-size: 0.85rem;">
+            <span>音量タイムライン</span>
+            <span id="liveStatus" style="color: var(--accent-green);">停止中</span>
+        </div>
+        <canvas id="timelineCanvas"></canvas>
+    </div>
+
+    <div class="card">
+        <div style="font-weight: bold; font-size: 0.9rem; margin-bottom: 8px;">
+            危険音声サンプル (最大10件) (<span id="eventCount">0</span>)
+        </div>
+        <div id="eventList">
+            <p style="color: var(--text-sub); font-size: 0.85rem;">危険ないびきや無呼吸パターンが判定されると、直前15秒の音声が自動切り出しされて追加されます。</p>
+        </div>
+    </div>
+
+    <script>
+        const SILENCE_DB = -45;
+        const SNORE_DB = -30;
+        const SPIKE_DB = -20;
+        const MIN_SILENCE_SEC = 10;
+
+        let audioContext, analyser, microphone, mediaRecorder;
+        let wakeLock = null;
+        let isRunning = false;
+        let selectedMimeType = '';
+        
+        const MAX_TIMELINE_POINTS = 1000; 
+        const MAX_EVENT_LOGS = 10;
+        
+        let timelineData = []; 
+        let ringBuffer = [];   
+        let events = [];       
+
+        let currentSilenceSec = 0;
+        let maxSilenceSec = 0;
+        let alertCount = 0;
+        let snoreSeconds = 0;
+        let totalRecordedSeconds = 0;
+
+        const toggleBtn = document.getElementById('toggleBtn');
+        const testBtn = document.getElementById('testBtn');
+        const liveStatus = document.getElementById('liveStatus');
+        const wakeLockStatus = document.getElementById('wakeLockStatus');
+        const mimeStatus = document.getElementById('mimeStatus');
+        const canvas = document.getElementById('timelineCanvas');
+        const ctx = canvas.getContext('2d');
+
+        function resizeCanvas() {
+            canvas.width = canvas.clientWidth * window.devicePixelRatio;
+            canvas.height = canvas.clientHeight * window.devicePixelRatio;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        function getSupportedMimeType() {
+            const types = [
+                'audio/webm;codecs=opus',
+                'audio/webm',
+                'audio/mp4',
+                'audio/aac',
+                'audio/ogg'
+            ];
+            for (let t of types) {
+                if (MediaRecorder.isTypeSupported(t)) return t;
+            }
+            return '';
+        }
+
+        async function requestWakeLock() {
+            try {
+                if ('wakeLock' in navigator) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    wakeLockStatus.innerText = "スリープ防止: 有効（画面常時ON）";
+                } else {
+                    wakeLockStatus.innerText = "スリープ防止: 非対応（明るさを最小にして稼働してください）";
+                }
+            } catch (err) {
+                wakeLockStatus.innerText = "スリープ防止エラー: " + err.message;
+            }
+        }
+
+        function releaseWakeLock() {
+            if (wakeLock !== null) {
+                wakeLock.release();
+                wakeLock = null;
+                wakeLockStatus.innerText = "スリープ防止: 解除済み";
+            }
+        }
+
+        toggleBtn.addEventListener('click', async () => {
+            if (!isRunning) {
+                await startRecording();
+            } else {
+                stopRecording();
+            }
+        });
+
+        testBtn.addEventListener('click', () => {
+            if (!isRunning) {
+                alert("先に「計測を開始する」を押してマイクを起動してください。");
+                return;
+            }
+            saveEvent('【テスト】音声切り出しテスト', 12, -15);
+        });
+
+        async function startRecording() {
+            try {
+                const constraints = {
+                    audio: {
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: false
+                    }
+                };
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                }
+
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 512;
+
+                microphone = audioContext.createMediaStreamSource(stream);
+                microphone.connect(analyser);
+
+                selectedMimeType = getSupportedMimeType();
+                const options = selectedMimeType ? { mimeType: selectedMimeType } : {};
+                mediaRecorder = new MediaRecorder(stream, options);
+
+                mimeStatus.innerText = "録音形式: " + (selectedMimeType || "デフォルト");
+
+                ringBuffer = [];
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data && e.data.size > 0) {
+                        ringBuffer.push(e.data);
+                        if (ringBuffer.length > 15) ringBuffer.shift(); 
+                    }
+                };
+                mediaRecorder.start(1000); 
+
+                await requestWakeLock();
+
+                isRunning = true;
+                toggleBtn.innerText = "計測を停止する";
+                toggleBtn.style.background = "var(--alert-red)";
+                liveStatus.innerText = "計測中...";
+
+                analyzeLoop();
+            } catch (err) {
+                alert("マイク初期化エラー: " + err.message);
+            }
+        }
+
+        function stopRecording() {
+            isRunning = false;
+            if (audioContext) audioContext.close();
+            if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+            releaseWakeLock();
+
+            toggleBtn.innerText = "計測を開始する";
+            toggleBtn.style.background = "var(--accent-green)";
+            liveStatus.innerText = "停止中";
+        }
+
+        function analyzeLoop() {
+            if (!isRunning) return;
+
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+            analyser.getByteFrequencyData(dataArray);
+
+            let sum = 0;
+            for (let i = 0; i < dataArray.length; i++) sum += dataArray[i] * dataArray[i];
+            let rms = Math.sqrt(sum / dataArray.length);
+            let db = rms > 0 ? 20 * Math.log10(rms / 255) : -100;
+            db = Math.max(-100, Math.min(0, db));
+
+            let type = 'normal';
+            totalRecordedSeconds += 1;
+
+            if (db < SILENCE_DB) {
+                type = 'silence';
+                currentSilenceSec += 1;
+                if (currentSilenceSec > maxSilenceSec) maxSilenceSec = currentSilenceSec;
+            } else {
+                if (currentSilenceSec >= MIN_SILENCE_SEC && db > SPIKE_DB) {
+                    type = 'alert';
+                    saveEvent('無呼吸疑い（息の吹き返し）', currentSilenceSec, db);
+                } else if (db > SPIKE_DB) {
+                    type = 'alert';
+                    saveEvent('巨大いびき検知', 0, db);
+                } else if (db > SNORE_DB) {
+                    type = 'snore';
+                    snoreSeconds += 1;
+                }
+                currentSilenceSec = 0;
+            }
+
+            timelineData.push({ time: new Date().toLocaleTimeString(), db: db, type: type });
+            if (timelineData.length > MAX_TIMELINE_POINTS) timelineData.shift();
+
+            updateSummary();
+            drawTimeline();
+
+            setTimeout(analyzeLoop, 1000); 
+        }
+
+        function saveEvent(label, silenceSec, db) {
+            if (ringBuffer.length === 0) {
+                alert("音声バッファがまだ蓄積されていません。数秒待ってから再試行してください。");
+                return;
+            }
+
+            alertCount += 1;
+            const typeOption = selectedMimeType ? { type: selectedMimeType } : {};
+            const blob = new Blob([...ringBuffer], typeOption);
+
+            // Base64 DataURL 変換により Android での再生阻害を回避
+            const reader = new FileReader();
+            reader.readAsDataURL(blob);
+            reader.onloadend = function() {
+                const base64AudioUrl = reader.result;
+
+                events.unshift({
+                    time: new Date().toLocaleTimeString(),
+                    label: label,
+                    detail: silenceSec > 0 ? `無音: ${silenceSec.toFixed(0)}秒 ➔ 復帰音: ${Math.round(db)}dB` : `音量: ${Math.round(db)}dB`,
+                    url: base64AudioUrl,
+                    type: silenceSec > 0 ? 'sas' : 'snore'
+                });
+
+                if (events.length > MAX_EVENT_LOGS) {
+                    events.pop();
+                }
+
+                renderEvents();
+            };
+        }
+
+        function updateSummary() {
+            document.getElementById('summaryAlerts').innerText = `${alertCount} 回`;
+            document.getElementById('summaryMaxSilence').innerText = `${maxSilenceSec.toFixed(0)} 秒`;
+            const ratio = Math.round((snoreSeconds / Math.max(1, totalRecordedSeconds)) * 100);
+            document.getElementById('summarySnoreRatio').innerText = `${ratio} %`;
+        }
+
+        function drawTimeline() {
+            const w = canvas.width;
+            const h = canvas.height;
+            ctx.clearRect(0, 0, w, h);
+
+            if (timelineData.length === 0) return;
+
+            const step = w / timelineData.length;
+
+            for (let i = 0; i < timelineData.length; i++) {
+                const item = timelineData[i];
+                const barHeight = ((item.db + 100) / 100) * h;
+                const x = i * step;
+                const y = h - barHeight;
+
+                if (item.type === 'alert') ctx.fillStyle = '#ff5252';       
+                else if (item.type === 'snore') ctx.fillStyle = '#ffb300';  
+                else if (item.type === 'silence') ctx.fillStyle = '#444444';
+                else ctx.fillStyle = '#00e676';                             
+
+                ctx.fillRect(x, y, Math.max(2, step - 1), barHeight);
+            }
+        }
+
+        function renderEvents() {
+            document.getElementById('eventCount').innerText = events.length;
+            const listEl = document.getElementById('eventList');
+            
+            if (events.length === 0) {
+                listEl.innerHTML = '<p style="color: var(--text-sub); font-size: 0.85rem;">危険ないびきや無呼吸パターンが判定されると、直前15秒の音声が自動切り出しされて追加されます。</p>';
+                return;
+            }
+
+            listEl.innerHTML = events.map(ev => `
+                <div class="event-item">
+                    <div>
+                        <span class="event-tag ${ev.type === 'sas' ? 'tag-sas' : 'tag-snore'}">${ev.label}</span>
+                        <span style="font-size:0.8rem; color:var(--text-sub);">[${ev.time}]</span>
+                    </div>
+                    <div style="font-size:0.85rem; color:#ccc; margin:4px 0;">${ev.detail}</div>
+                    <audio controls controlsList="nodownload" src="${ev.url}"></audio>
+                </div>
+            `).join('');
+        }
+    </script>
+</body>
+</html>            font-weight: bold;
             border: none;
             border-radius: 8px;
             background: var(--accent-green);
