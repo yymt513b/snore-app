@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Snore & SAS Monitor Lite (Scroll Fixed)</title>
+    <title>Snore & SAS Monitor Lite (Sleep & Dimmer Fixed)</title>
     <style>
         :root {
             --bg-color: #121212;
@@ -65,7 +65,6 @@
             font-weight: bold;
             margin-top: 4px;
         }
-        /* スクロール時のキャンバス消失防止用コンテナ */
         .canvas-container {
             width: 100%;
             height: 140px;
@@ -95,9 +94,39 @@
         .tag-snore { background: var(--warn-yellow); color: #000; }
         audio { width: 100%; height: 36px; margin-top: 6px; }
         .note { font-size: 0.75rem; color: var(--text-sub); text-align: center; }
+
+        /* 画面暗転用オーバーレイ */
+        #dimmerOverlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background-color: #000000;
+            opacity: 0.98; /* ほぼ真っ黒に減光 */
+            z-index: 9999;
+            color: #333333;
+            text-align: center;
+            padding-top: 40vh;
+            font-size: 0.8rem;
+            box-sizing: border-box;
+            user-select: none;
+        }
     </style>
 </head>
 <body>
+
+    <!-- 暗転モード用の全面オーバーレイ -->
+    <div id="dimmerOverlay">
+        画面をタップすると表示が戻ります<br>
+        <span style="font-size:0.7rem; color:#222;">(計測継続中)</span>
+    </div>
+
+    <!-- スリープ防止用のダミー動画（画面外設置） -->
+    <video id="noSleepVideo" playsinline loop muted style="display:none; width:1px; height:1px;">
+        <source src="data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28ybXA0MQAAAAhmcmVlAAAAAG1kYXQAAAA=" type="video/mp4">
+    </video>
 
     <h1>いびき・SAS 睡眠モニター</h1>
 
@@ -176,8 +205,9 @@
         const mimeStatus = document.getElementById('mimeStatus');
         const canvas = document.getElementById('timelineCanvas');
         const ctx = canvas.getContext('2d');
+        const dimmerOverlay = document.getElementById('dimmerOverlay');
+        const noSleepVideo = document.getElementById('noSleepVideo');
 
-        // スクロールで幅・高さを不必要にリセットさせない安全なリサイズ処理
         function resizeCanvas() {
             if (!canvas) return;
             const container = canvas.parentElement;
@@ -185,7 +215,6 @@
             if (rect.width > 0 && rect.height > 0) {
                 const newWidth = Math.floor(rect.width * window.devicePixelRatio);
                 const newHeight = Math.floor(rect.height * window.devicePixelRatio);
-                // 実際に描画領域のサイズが変化した場合のみリサイズ＆描画
                 if (canvas.width !== newWidth || canvas.height !== newHeight) {
                     canvas.width = newWidth;
                     canvas.height = newHeight;
@@ -214,26 +243,50 @@
             return '';
         }
 
-        async function requestWakeLock() {
+        // 強力なスリープ防止処理 (WakeLock + Video Keep-Alive)
+        async function enableNoSleep() {
             try {
                 if ('wakeLock' in navigator) {
                     wakeLock = await navigator.wakeLock.request('screen');
-                    wakeLockStatus.innerText = "スリープ防止: 有効（画面常時ON）";
-                } else {
-                    wakeLockStatus.innerText = "スリープ防止: 非対応（明るさを最小にして稼働してください）";
+                    wakeLockStatus.innerText = "スリープ防止: 有効（WakeLock）";
                 }
             } catch (err) {
-                wakeLockStatus.innerText = "スリープ防止エラー: " + err.message;
+                console.warn("WakeLock Error:", err);
+            }
+
+            // ダミー動画をループ再生してAndroidの画面オフを二重に防御
+            try {
+                await noSleepVideo.play();
+                if (!wakeLock) {
+                    wakeLockStatus.innerText = "スリープ防止: 有効（バックグラウンド再生）";
+                }
+            } catch (err) {
+                console.warn("Video Keep-Alive Error:", err);
             }
         }
 
-        function releaseWakeLock() {
+        function disableNoSleep() {
             if (wakeLock !== null) {
                 wakeLock.release();
                 wakeLock = null;
-                wakeLockStatus.innerText = "スリープ防止: 解除済み";
             }
+            noSleepVideo.pause();
+            wakeLockStatus.innerText = "スリープ防止: 解除済み";
         }
+
+        // 輝度制御（オーバーレイ表示・非表示）
+        function enableDimmer() {
+            dimmerOverlay.style.display = 'block';
+        }
+
+        function disableDimmer() {
+            dimmerOverlay.style.display = 'none';
+        }
+
+        // 暗転画面タップで一時的に画面を明るく戻す
+        dimmerOverlay.addEventListener('click', () => {
+            disableDimmer();
+        });
 
         toggleBtn.addEventListener('click', async () => {
             if (!isRunning) {
@@ -288,7 +341,8 @@
                 };
                 mediaRecorder.start(1000); 
 
-                await requestWakeLock();
+                await enableNoSleep();
+                enableDimmer(); // 記録開始時に自動暗転（輝度ダウン）
 
                 isRunning = true;
                 toggleBtn.innerText = "計測を停止する";
@@ -306,7 +360,9 @@
             isRunning = false;
             if (audioContext) audioContext.close();
             if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
-            releaseWakeLock();
+            
+            disableNoSleep();
+            disableDimmer(); // 停止時に元の明るさに復帰
 
             toggleBtn.innerText = "計測を開始する";
             toggleBtn.style.background = "var(--accent-green)";
