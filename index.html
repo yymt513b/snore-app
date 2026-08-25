@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Snore & SAS Monitor Lite (Bug Fixed)</title>
+    <title>Snore & SAS Monitor Lite (Init Fixed)</title>
     <style>
         :root {
             --bg-color: #121212;
@@ -106,10 +106,10 @@
             background-color: #000000;
             opacity: 0.98;
             z-index: 9999;
-            color: #333333;
+            color: #444444;
             text-align: center;
             padding-top: 40vh;
-            font-size: 0.8rem;
+            font-size: 0.85rem;
             box-sizing: border-box;
             user-select: none;
         }
@@ -119,7 +119,7 @@
 
     <div id="dimmerOverlay">
         画面をタップすると表示が戻ります<br>
-        <span style="font-size:0.7rem; color:#222;">(計測継続中)</span>
+        <span style="font-size:0.75rem; color:#222;">(計測継続中)</span>
     </div>
 
     <video id="noSleepVideo" playsinline loop muted style="display:none; width:1px; height:1px;">
@@ -173,327 +173,306 @@
     </div>
 
     <script>
-        const SILENCE_DB = -45;
-        const SNORE_DB = -30;
-        const SPIKE_DB = -20;
-        const MIN_SILENCE_SEC = 10;
+        document.addEventListener('DOMContentLoaded', () => {
+            const SILENCE_DB = -45;
+            const SNORE_DB = -30;
+            const SPIKE_DB = -20;
+            const MIN_SILENCE_SEC = 10;
 
-        let audioContext, analyser, microphone, mediaRecorder;
-        let wakeLock = null;
-        let isRunning = false;
-        let selectedMimeType = '';
-        
-        const MAX_TIMELINE_POINTS = 1000; 
-        const MAX_EVENT_LOGS = 10;
-        
-        let timelineData = []; 
-        let ringBuffer = [];   
-        let events = [];       
+            let audioContext, analyser, microphone, mediaRecorder;
+            let wakeLock = null;
+            let isRunning = false;
+            let selectedMimeType = '';
+            
+            const MAX_TIMELINE_POINTS = 1000; 
+            const MAX_EVENT_LOGS = 10;
+            
+            let timelineData = []; 
+            let ringBuffer = [];   
+            let events = [];       
 
-        let currentSilenceSec = 0;
-        let maxSilenceSec = 0;
-        let alertCount = 0;
-        let snoreSeconds = 0;
-        let totalRecordedSeconds = 0;
+            let currentSilenceSec = 0;
+            let maxSilenceSec = 0;
+            let alertCount = 0;
+            let snoreSeconds = 0;
+            let totalRecordedSeconds = 0;
 
-        const toggleBtn = document.getElementById('toggleBtn');
-        const testBtn = document.getElementById('testBtn');
-        const liveStatus = document.getElementById('liveStatus');
-        const wakeLockStatus = document.getElementById('wakeLockStatus');
-        const mimeStatus = document.getElementById('mimeStatus');
-        const canvas = document.getElementById('timelineCanvas');
-        const ctx = canvas.getContext('2d');
-        const dimmerOverlay = document.getElementById('dimmerOverlay');
-        const noSleepVideo = document.getElementById('noSleepVideo');
+            const toggleBtn = document.getElementById('toggleBtn');
+            const testBtn = document.getElementById('testBtn');
+            const liveStatus = document.getElementById('liveStatus');
+            const wakeLockStatus = document.getElementById('wakeLockStatus');
+            const mimeStatus = document.getElementById('mimeStatus');
+            const canvas = document.getElementById('timelineCanvas');
+            const ctx = canvas.getContext('2d');
+            const dimmerOverlay = document.getElementById('dimmerOverlay');
+            const noSleepVideo = document.getElementById('noSleepVideo');
 
-        function resizeCanvas() {
-            if (!canvas) return;
-            const container = canvas.parentElement;
-            const rect = container.getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0) {
-                const newWidth = Math.floor(rect.width * window.devicePixelRatio);
-                const newHeight = Math.floor(rect.height * window.devicePixelRatio);
-                if (canvas.width !== newWidth || canvas.height !== newHeight) {
-                    canvas.width = newWidth;
-                    canvas.height = newHeight;
-                    drawTimeline();
+            function resizeCanvas() {
+                if (!canvas) return;
+                const container = canvas.parentElement;
+                const rect = container.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    const newWidth = Math.floor(rect.width * window.devicePixelRatio);
+                    const newHeight = Math.floor(rect.height * window.devicePixelRatio);
+                    if (canvas.width !== newWidth || canvas.height !== newHeight) {
+                        canvas.width = newWidth;
+                        canvas.height = newHeight;
+                        drawTimeline();
+                    }
                 }
             }
-        }
 
-        window.addEventListener('resize', resizeCanvas);
-        window.addEventListener('orientationchange', () => {
-            setTimeout(resizeCanvas, 200);
-        });
-        document.addEventListener('DOMContentLoaded', resizeCanvas);
+            window.addEventListener('resize', resizeCanvas);
+            window.addEventListener('orientationchange', () => { setTimeout(resizeCanvas, 200); });
+            resizeCanvas();
 
-        function getSupportedMimeType() {
-            const types = [
-                'audio/webm;codecs=opus',
-                'audio/webm',
-                'audio/mp4',
-                'audio/aac',
-                'audio/ogg'
-            ];
-            for (let t of types) {
-                if (MediaRecorder.isTypeSupported(t)) return t;
-            }
-            return '';
-        }
-
-        async function enableNoSleep() {
-            try {
-                if ('wakeLock' in navigator) {
-                    wakeLock = await navigator.wakeLock.request('screen');
-                    wakeLockStatus.innerText = "スリープ防止: 有効（WakeLock）";
+            function getSupportedMimeType() {
+                const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/aac', 'audio/ogg'];
+                for (let t of types) {
+                    if (MediaRecorder.isTypeSupported(t)) return t;
                 }
-            } catch (err) {
-                console.warn("WakeLock Error:", err);
+                return '';
             }
 
-            try {
-                await noSleepVideo.play();
-                if (!wakeLock) {
-                    wakeLockStatus.innerText = "スリープ防止: 有効（動画再生維持）";
+            async function enableNoSleep() {
+                try {
+                    if ('wakeLock' in navigator) {
+                        wakeLock = await navigator.wakeLock.request('screen');
+                        wakeLockStatus.innerText = "スリープ防止: 有効（WakeLock）";
+                    }
+                } catch (err) {}
+
+                try {
+                    await noSleepVideo.play();
+                    if (!wakeLock) {
+                        wakeLockStatus.innerText = "スリープ防止: 有効（動画再生維持）";
+                    }
+                } catch (err) {}
+            }
+
+            function disableNoSleep() {
+                if (wakeLock !== null) {
+                    wakeLock.release().catch(() => {});
+                    wakeLock = null;
                 }
-            } catch (err) {
-                console.warn("Video Play Error:", err);
+                noSleepVideo.pause();
+                wakeLockStatus.innerText = "スリープ防止: 解除済み";
             }
-        }
 
-        function disableNoSleep() {
-            if (wakeLock !== null) {
-                wakeLock.release().catch(() => {});
-                wakeLock = null;
+            function enableDimmer() {
+                dimmerOverlay.style.display = 'block';
             }
-            noSleepVideo.pause();
-            wakeLockStatus.innerText = "スリープ防止: 解除済み";
-        }
 
-        function enableDimmer() {
-            if (dimmerOverlay) dimmerOverlay.style.display = 'block';
-        }
+            function disableDimmer() {
+                dimmerOverlay.style.display = 'none';
+            }
 
-        function disableDimmer() {
-            if (dimmerOverlay) dimmerOverlay.style.display = 'none';
-        }
-
-        if (dimmerOverlay) {
             dimmerOverlay.addEventListener('click', () => {
                 disableDimmer();
             });
-        }
 
-        toggleBtn.addEventListener('click', async () => {
-            if (!isRunning) {
-                await startRecording();
-            } else {
-                stopRecording();
-            }
-        });
+            toggleBtn.addEventListener('click', async () => {
+                if (!isRunning) {
+                    await startRecording();
+                } else {
+                    stopRecording();
+                }
+            });
 
-        testBtn.addEventListener('click', () => {
-            if (!isRunning) {
-                alert("先に「計測を開始する」を押してマイクを起動してください。");
-                return;
-            }
-            saveEvent('【テスト】音声切り出しテスト', 12, -15);
-        });
+            testBtn.addEventListener('click', () => {
+                if (!isRunning) {
+                    alert("先に「計測を開始する」を押してマイクを起動してください。");
+                    return;
+                }
+                saveEvent('【テスト】音声切り出しテスト', 12, -15);
+            });
 
-        async function startRecording() {
-            try {
-                const constraints = {
-                    audio: {
-                        echoCancellation: false,
-                        noiseSuppression: false,
-                        autoGainControl: false
+            async function startRecording() {
+                try {
+                    const constraints = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } };
+                    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    if (audioContext.state === 'suspended') {
+                        await audioContext.resume();
                     }
-                };
-                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+                    analyser = audioContext.createAnalyser();
+                    analyser.fftSize = 512;
+
+                    microphone = audioContext.createMediaStreamSource(stream);
+                    microphone.connect(analyser);
+
+                    selectedMimeType = getSupportedMimeType();
+                    const options = selectedMimeType ? { mimeType: selectedMimeType } : {};
+                    mediaRecorder = new MediaRecorder(stream, options);
+
+                    mimeStatus.innerText = "録音形式: " + (selectedMimeType || "デフォルト");
+
+                    ringBuffer = [];
+                    mediaRecorder.ondataavailable = (e) => {
+                        if (e.data && e.data.size > 0) {
+                            ringBuffer.push(e.data);
+                            if (ringBuffer.length > 15) ringBuffer.shift(); 
+                        }
+                    };
+                    mediaRecorder.start(1000); 
+
+                    isRunning = true;
+                    toggleBtn.innerText = "計測を停止する";
+                    toggleBtn.style.background = "var(--alert-red)";
+                    liveStatus.innerText = "計測中...";
+
+                    enableNoSleep();
+                    enableDimmer(); // 暗転処理をオン
+
+                    resizeCanvas();
+                    analyzeLoop();
+                } catch (err) {
+                    alert("マイクの起動に失敗しました: " + err.message);
+                }
+            }
+
+            function stopRecording() {
+                isRunning = false;
+                if (audioContext) audioContext.close();
+                if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
                 
-                audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                if (audioContext.state === 'suspended') {
-                    await audioContext.resume();
-                }
+                disableNoSleep();
+                disableDimmer(); // 暗転処理をオフ
 
-                analyser = audioContext.createAnalyser();
-                analyser.fftSize = 512;
+                toggleBtn.innerText = "計測を開始する";
+                toggleBtn.style.background = "var(--accent-green)";
+                liveStatus.innerText = "停止中";
+            }
 
-                microphone = audioContext.createMediaStreamSource(stream);
-                microphone.connect(analyser);
+            function analyzeLoop() {
+                if (!isRunning) return;
 
-                selectedMimeType = getSupportedMimeType();
-                const options = selectedMimeType ? { mimeType: selectedMimeType } : {};
-                mediaRecorder = new MediaRecorder(stream, options);
+                const dataArray = new Uint8Array(analyser.frequencyBinCount);
+                analyser.getByteFrequencyData(dataArray);
 
-                mimeStatus.innerText = "録音形式: " + (selectedMimeType || "デフォルト");
+                let sum = 0;
+                for (let i = 0; i < dataArray.length; i++) sum += dataArray[i] * dataArray[i];
+                let rms = Math.sqrt(sum / dataArray.length);
+                let db = rms > 0 ? 20 * Math.log10(rms / 255) : -100;
+                db = Math.max(-100, Math.min(0, db));
 
-                ringBuffer = [];
-                mediaRecorder.ondataavailable = (e) => {
-                    if (e.data && e.data.size > 0) {
-                        ringBuffer.push(e.data);
-                        if (ringBuffer.length > 15) ringBuffer.shift(); 
+                let type = 'normal';
+                totalRecordedSeconds += 1;
+
+                if (db < SILENCE_DB) {
+                    type = 'silence';
+                    currentSilenceSec += 1;
+                    if (currentSilenceSec > maxSilenceSec) maxSilenceSec = currentSilenceSec;
+                } else {
+                    if (currentSilenceSec >= MIN_SILENCE_SEC && db > SPIKE_DB) {
+                        type = 'alert';
+                        saveEvent('無呼吸疑い（息の吹き返し）', currentSilenceSec, db);
+                    } else if (db > SPIKE_DB) {
+                        type = 'alert';
+                        saveEvent('巨大いびき検知', 0, db);
+                    } else if (db > SNORE_DB) {
+                        type = 'snore';
+                        snoreSeconds += 1;
                     }
+                    currentSilenceSec = 0;
+                }
+
+                timelineData.push({ time: new Date().toLocaleTimeString(), db: db, type: type });
+                if (timelineData.length > MAX_TIMELINE_POINTS) timelineData.shift();
+
+                updateSummary();
+                drawTimeline();
+
+                setTimeout(analyzeLoop, 1000); 
+            }
+
+            function saveEvent(label, silenceSec, db) {
+                if (ringBuffer.length === 0) {
+                    alert("音声バッファがまだ蓄積されていません。数秒待ってから再試行してください。");
+                    return;
+                }
+
+                alertCount += 1;
+                const typeOption = selectedMimeType ? { type: selectedMimeType } : {};
+                const blob = new Blob([...ringBuffer], typeOption);
+
+                const reader = new FileReader();
+                reader.readAsDataURL(blob);
+                reader.onloadend = function() {
+                    const base64AudioUrl = reader.result;
+
+                    events.unshift({
+                        time: new Date().toLocaleTimeString(),
+                        label: label,
+                        detail: silenceSec > 0 ? `無音: ${silenceSec.toFixed(0)}秒 ➔ 復帰音: ${Math.round(db)}dB` : `音量: ${Math.round(db)}dB`,
+                        url: base64AudioUrl,
+                        type: silenceSec > 0 ? 'sas' : 'snore'
+                    });
+
+                    if (events.length > MAX_EVENT_LOGS) {
+                        events.pop();
+                    }
+
+                    renderEvents();
                 };
-                mediaRecorder.start(1000); 
-
-                // スリープ防止と画面暗転を安全に起動
-                try { await enableNoSleep(); } catch(e) {}
-                enableDimmer();
-
-                isRunning = true;
-                toggleBtn.innerText = "計測を停止する";
-                toggleBtn.style.background = "var(--alert-red)";
-                liveStatus.innerText = "計測中...";
-
-                resizeCanvas();
-                analyzeLoop();
-            } catch (err) {
-                alert("計測の開始に失敗しました: " + err.message);
             }
-        }
 
-        function stopRecording() {
-            isRunning = false;
-            if (audioContext) audioContext.close();
-            if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
-            
-            disableNoSleep();
-            disableDimmer();
+            function updateSummary() {
+                document.getElementById('summaryAlerts').innerText = `${alertCount} 回`;
+                document.getElementById('summaryMaxSilence').innerText = `${maxSilenceSec.toFixed(0)} 秒`;
+                const ratio = Math.round((snoreSeconds / Math.max(1, totalRecordedSeconds)) * 100);
+                document.getElementById('summarySnoreRatio').innerText = `${ratio} %`;
+            }
 
-            toggleBtn.innerText = "計測を開始する";
-            toggleBtn.style.background = "var(--accent-green)";
-            liveStatus.innerText = "停止中";
-        }
+            function drawTimeline() {
+                if (!canvas.width || !canvas.height) resizeCanvas();
 
-        function analyzeLoop() {
-            if (!isRunning) return;
+                const w = canvas.width;
+                const h = canvas.height;
+                ctx.clearRect(0, 0, w, h);
 
-            const dataArray = new Uint8Array(analyser.frequencyBinCount);
-            analyser.getByteFrequencyData(dataArray);
+                if (timelineData.length === 0) return;
 
-            let sum = 0;
-            for (let i = 0; i < dataArray.length; i++) sum += dataArray[i] * dataArray[i];
-            let rms = Math.sqrt(sum / dataArray.length);
-            let db = rms > 0 ? 20 * Math.log10(rms / 255) : -100;
-            db = Math.max(-100, Math.min(0, db));
+                const step = w / timelineData.length;
 
-            let type = 'normal';
-            totalRecordedSeconds += 1;
+                for (let i = 0; i < timelineData.length; i++) {
+                    const item = timelineData[i];
+                    const barHeight = ((item.db + 100) / 100) * h;
+                    const x = i * step;
+                    const y = h - barHeight;
 
-            if (db < SILENCE_DB) {
-                type = 'silence';
-                currentSilenceSec += 1;
-                if (currentSilenceSec > maxSilenceSec) maxSilenceSec = currentSilenceSec;
-            } else {
-                if (currentSilenceSec >= MIN_SILENCE_SEC && db > SPIKE_DB) {
-                    type = 'alert';
-                    saveEvent('無呼吸疑い（息の吹き返し）', currentSilenceSec, db);
-                } else if (db > SPIKE_DB) {
-                    type = 'alert';
-                    saveEvent('巨大いびき検知', 0, db);
-                } else if (db > SNORE_DB) {
-                    type = 'snore';
-                    snoreSeconds += 1;
+                    if (item.type === 'alert') ctx.fillStyle = '#ff5252';       
+                    else if (item.type === 'snore') ctx.fillStyle = '#ffb300';  
+                    else if (item.type === 'silence') ctx.fillStyle = '#444444';
+                    else ctx.fillStyle = '#00e676';                             
+
+                    ctx.fillRect(x, y, Math.max(2, step - 1), barHeight);
                 }
-                currentSilenceSec = 0;
             }
 
-            timelineData.push({ time: new Date().toLocaleTimeString(), db: db, type: type });
-            if (timelineData.length > MAX_TIMELINE_POINTS) timelineData.shift();
-
-            updateSummary();
-            drawTimeline();
-
-            setTimeout(analyzeLoop, 1000); 
-        }
-
-        function saveEvent(label, silenceSec, db) {
-            if (ringBuffer.length === 0) {
-                alert("音声バッファがまだ蓄積されていません。数秒待ってから再試行してください。");
-                return;
-            }
-
-            alertCount += 1;
-            const typeOption = selectedMimeType ? { type: selectedMimeType } : {};
-            const blob = new Blob([...ringBuffer], typeOption);
-
-            const reader = new FileReader();
-            reader.readAsDataURL(blob);
-            reader.onloadend = function() {
-                const base64AudioUrl = reader.result;
-
-                events.unshift({
-                    time: new Date().toLocaleTimeString(),
-                    label: label,
-                    detail: silenceSec > 0 ? `無音: ${silenceSec.toFixed(0)}秒 ➔ 復帰音: ${Math.round(db)}dB` : `音量: ${Math.round(db)}dB`,
-                    url: base64AudioUrl,
-                    type: silenceSec > 0 ? 'sas' : 'snore'
-                });
-
-                if (events.length > MAX_EVENT_LOGS) {
-                    events.pop();
+            function renderEvents() {
+                document.getElementById('eventCount').innerText = events.length;
+                const listEl = document.getElementById('eventList');
+                
+                if (events.length === 0) {
+                    listEl.innerHTML = '<p style="color: var(--text-sub); font-size: 0.85rem;">危険ないびきや無呼吸パターンが判定されると、直前15秒の音声が自動切り出しされて追加されます。</p>';
+                    return;
                 }
 
-                renderEvents();
-            };
-        }
-
-        function updateSummary() {
-            document.getElementById('summaryAlerts').innerText = `${alertCount} 回`;
-            document.getElementById('summaryMaxSilence').innerText = `${maxSilenceSec.toFixed(0)} 秒`;
-            const ratio = Math.round((snoreSeconds / Math.max(1, totalRecordedSeconds)) * 100);
-            document.getElementById('summarySnoreRatio').innerText = `${ratio} %`;
-        }
-
-        function drawTimeline() {
-            if (!canvas.width || !canvas.height) resizeCanvas();
-
-            const w = canvas.width;
-            const h = canvas.height;
-            ctx.clearRect(0, 0, w, h);
-
-            if (timelineData.length === 0) return;
-
-            const step = w / timelineData.length;
-
-            for (let i = 0; i < timelineData.length; i++) {
-                const item = timelineData[i];
-                const barHeight = ((item.db + 100) / 100) * h;
-                const x = i * step;
-                const y = h - barHeight;
-
-                if (item.type === 'alert') ctx.fillStyle = '#ff5252';       
-                else if (item.type === 'snore') ctx.fillStyle = '#ffb300';  
-                else if (item.type === 'silence') ctx.fillStyle = '#444444';
-                else ctx.fillStyle = '#00e676';                             
-
-                ctx.fillRect(x, y, Math.max(2, step - 1), barHeight);
-            }
-        }
-
-        function renderEvents() {
-            document.getElementById('eventCount').innerText = events.length;
-            const listEl = document.getElementById('eventList');
-            
-            if (events.length === 0) {
-                listEl.innerHTML = '<p style="color: var(--text-sub); font-size: 0.85rem;">危険ないびきや無呼吸パターンが判定されると、直前15秒の音声が自動切り出しされて追加されます。</p>';
-                return;
-            }
-
-            listEl.innerHTML = events.map(ev => `
-                <div class="event-item">
-                    <div>
-                        <span class="event-tag ${ev.type === 'sas' ? 'tag-sas' : 'tag-snore'}">${ev.label}</span>
-                        <span style="font-size:0.8rem; color:var(--text-sub);">[${ev.time}]</span>
+                listEl.innerHTML = events.map(ev => `
+                    <div class="event-item">
+                        <div>
+                            <span class="event-tag ${ev.type === 'sas' ? 'tag-sas' : 'tag-snore'}">${ev.label}</span>
+                            <span style="font-size:0.8rem; color:var(--text-sub);">[${ev.time}]</span>
+                        </div>
+                        <div style="font-size:0.85rem; color:#ccc; margin:4px 0;">${ev.detail}</div>
+                        <audio controls controlsList="nodownload" src="${ev.url}"></audio>
                     </div>
-                    <div style="font-size:0.85rem; color:#ccc; margin:4px 0;">${ev.detail}</div>
-                    <audio controls controlsList="nodownload" src="${ev.url}"></audio>
-                </div>
-            `).join('');
-        }
-
-        resizeCanvas();
+                `).join('');
+            }
+        });
     </script>
 </body>
 </html>
