@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Snore & SAS Monitor Lite</title>
     
-    <!-- PWA / 全画面表示用連携設定 (アドレスバー完全消去用) -->
     <link rel="manifest" href="manifest.json">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
@@ -56,6 +55,13 @@
             padding: 10px;
             font-size: 0.85rem;
         }
+        .btn-clear {
+            background: #444;
+            color: #ff5252;
+            padding: 8px;
+            font-size: 0.75rem;
+            margin-top: 8px;
+        }
         .summary-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
@@ -103,7 +109,6 @@
         audio { width: 100%; height: 36px; margin-top: 6px; }
         .note { font-size: 0.75rem; color: var(--text-sub); text-align: center; }
 
-        /* 画面全体（アドレスバー等含む全画面領域）を覆う暗転オーバーレイ */
         #dimmerOverlay {
             display: none;
             position: fixed;
@@ -172,12 +177,15 @@
     </div>
 
     <div class="card">
-        <div style="font-weight: bold; font-size: 0.9rem; margin-bottom: 8px;">
-            危険音声サンプル (最大10件) (<span id="eventCount">0</span>)
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <div style="font-weight: bold; font-size: 0.9rem;">
+                危険音声保存ログ (過去3日分) (<span id="eventCount">0</span>)
+            </div>
         </div>
         <div id="eventList">
-            <p style="color: var(--text-sub); font-size: 0.85rem;">危険ないびきや無呼吸パターンが判定されると、直前15秒の音声が自動切り出しされて追加されます。</p>
+            <p style="color: var(--text-sub); font-size: 0.85rem;">危険ないびきや無呼吸パターンが判定されると、直前15秒の音声が保存されます。</p>
         </div>
+        <button id="clearBtn" class="btn btn-clear">保存ログをすべて削除</button>
     </div>
 
     <script>
@@ -186,15 +194,15 @@
             const SNORE_DB = -30;
             const SPIKE_DB = -20;
             const MIN_SILENCE_SEC = 10;
+            const RETENTION_DAYS = 3; // 3日間保存
 
             let audioContext, analyser, microphone, mediaRecorder;
             let wakeLock = null;
             let isRunning = false;
             let selectedMimeType = '';
+            let db; // IndexedDB instance
             
             const MAX_TIMELINE_POINTS = 1000; 
-            const MAX_EVENT_LOGS = 10;
-            
             let timelineData = []; 
             let ringBuffer = [];   
             let events = [];       
@@ -207,6 +215,7 @@
 
             const toggleBtn = document.getElementById('toggleBtn');
             const testBtn = document.getElementById('testBtn');
+            const clearBtn = document.getElementById('clearBtn');
             const liveStatus = document.getElementById('liveStatus');
             const wakeLockStatus = document.getElementById('wakeLockStatus');
             const mimeStatus = document.getElementById('mimeStatus');
@@ -214,6 +223,63 @@
             const ctx = canvas.getContext('2d');
             const dimmerOverlay = document.getElementById('dimmerOverlay');
             const noSleepVideo = document.getElementById('noSleepVideo');
+
+            // --- IndexedDB (ローカルストレージ保存機能) ---
+            const dbReq = indexedDB.open('SnoreSASMonitorDB', 1);
+            dbReq.onupgradeneeded = (e) => {
+                const database = e.target.result;
+                if (!database.objectStoreNames.contains('events')) {
+                    database.createObjectStore('events', { keyPath: 'id', autoIncrement: true });
+                }
+            };
+            dbReq.onsuccess = (e) => {
+                db = e.target.result;
+                loadEventsFromDB();
+            };
+
+            function saveEventToDB(eventObj) {
+                if (!db) return;
+                const tx = db.transaction('events', 'readwrite');
+                tx.objectStore('events').add(eventObj);
+            }
+
+            function loadEventsFromDB() {
+                if (!db) return;
+                const tx = db.transaction('events', 'readonly');
+                const store = tx.objectStore('events');
+                const req = store.getAll();
+                req.onsuccess = () => {
+                    const now = Date.now();
+                    const expireTime = RETENTION_DAYS * 24 * 60 * 60 * 1000;
+                    
+                    // 3日以上古いデータを自動削除
+                    events = req.result.filter(item => {
+                        if (now - item.timestamp > expireTime) {
+                            deleteEventFromDB(item.id);
+                            return false;
+                        }
+                        return true;
+                    }).reverse();
+
+                    renderEvents();
+                };
+            }
+
+            function deleteEventFromDB(id) {
+                if (!db) return;
+                const tx = db.transaction('events', 'readwrite');
+                tx.objectStore('events').delete(id);
+            }
+
+            clearBtn.addEventListener('click', () => {
+                if (confirm("過去3日分の保存音声ログをすべて削除しますか？")) {
+                    if (!db) return;
+                    const tx = db.transaction('events', 'readwrite');
+                    tx.objectStore('events').clear();
+                    events = [];
+                    renderEvents();
+                }
+            });
 
             function resizeCanvas() {
                 if (!canvas) return;
@@ -396,11 +462,8 @@
                 setTimeout(analyzeLoop, 1000); 
             }
 
-            function saveEvent(label, silenceSec, db) {
-                if (ringBuffer.length === 0) {
-                    alert("音声バッファがまだ蓄積されていません。数秒待ってから再試行してください。");
-                    return;
-                }
+            function saveEvent(label, silenceSec, dbVal) {
+                if (ringBuffer.length === 0) return;
 
                 alertCount += 1;
                 const typeOption = selectedMimeType ? { type: selectedMimeType } : {};
@@ -411,18 +474,17 @@
                 reader.onloadend = function() {
                     const base64AudioUrl = reader.result;
 
-                    events.unshift({
-                        time: new Date().toLocaleTimeString(),
+                    const newEvent = {
+                        timestamp: Date.now(),
+                        dateStr: new Date().toLocaleDateString() + ' ' + new Date().toLocaleTimeString(),
                         label: label,
-                        detail: silenceSec > 0 ? `無音: ${silenceSec.toFixed(0)}秒 ➔ 復帰音: ${Math.round(db)}dB` : `音量: ${Math.round(db)}dB`,
+                        detail: silenceSec > 0 ? `無音: ${silenceSec.toFixed(0)}秒 ➔ 復帰音: ${Math.round(dbVal)}dB` : `音量: ${Math.round(dbVal)}dB`,
                         url: base64AudioUrl,
                         type: silenceSec > 0 ? 'sas' : 'snore'
-                    });
+                    };
 
-                    if (events.length > MAX_EVENT_LOGS) {
-                        events.pop();
-                    }
-
+                    saveEventToDB(newEvent);
+                    events.unshift(newEvent);
                     renderEvents();
                 };
             }
@@ -465,7 +527,7 @@
                 const listEl = document.getElementById('eventList');
                 
                 if (events.length === 0) {
-                    listEl.innerHTML = '<p style="color: var(--text-sub); font-size: 0.85rem;">危険ないびきや無呼吸パターンが判定されると、直前15秒の音声が自動切り出しされて追加されます。</p>';
+                    listEl.innerHTML = '<p style="color: var(--text-sub); font-size: 0.85rem;">過去3日分の保存データはありません。</p>';
                     return;
                 }
 
@@ -473,7 +535,7 @@
                     <div class="event-item">
                         <div>
                             <span class="event-tag ${ev.type === 'sas' ? 'tag-sas' : 'tag-snore'}">${ev.label}</span>
-                            <span style="font-size:0.8rem; color:var(--text-sub);">[${ev.time}]</span>
+                            <span style="font-size:0.8rem; color:var(--text-sub);">[${ev.dateStr}]</span>
                         </div>
                         <div style="font-size:0.85rem; color:#ccc; margin:4px 0;">${ev.detail}</div>
                         <audio controls controlsList="nodownload" src="${ev.url}"></audio>
