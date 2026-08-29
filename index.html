@@ -79,23 +79,35 @@
             font-weight: bold;
             margin-top: 4px;
         }
-        .canvas-container {
+        /* スクロール可能なタイムラインコンテナ */
+        .timeline-wrapper {
             width: 100%;
-            height: 140px;
-            position: relative;
-            margin-top: 8px;
-        }
-        canvas {
-            width: 100%;
-            height: 100%;
+            overflow-x: auto;
             background: #080808;
             border-radius: 6px;
+            margin-top: 8px;
+            -webkit-overflow-scrolling: touch;
+        }
+        .canvas-container {
+            height: 160px;
+            position: relative;
+            min-width: 100%;
+        }
+        canvas {
+            height: 100%;
             display: block;
         }
+        /* 日付ごとの背景色指定用クラス */
         .event-item {
             border-bottom: 1px solid #333;
-            padding: 10px 0;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 8px;
         }
+        .day-group-0 { background-color: #24282e; } /* 当日 */
+        .day-group-1 { background-color: #1f2a24; } /* 1日前 */
+        .day-group-2 { background-color: #2d232a; } /* 2日前 */
+
         .event-tag {
             display: inline-block;
             padding: 2px 6px;
@@ -168,11 +180,13 @@
 
     <div class="card">
         <div style="display: flex; justify-content: space-between; font-size: 0.85rem;">
-            <span>音量タイムライン</span>
+            <span>音量タイムライン（横スクロール可能）</span>
             <span id="liveStatus" style="color: var(--accent-green);">停止中</span>
         </div>
-        <div class="canvas-container">
-            <canvas id="timelineCanvas"></canvas>
+        <div class="timeline-wrapper" id="timelineWrapper">
+            <div class="canvas-container" id="canvasContainer">
+                <canvas id="timelineCanvas"></canvas>
+            </div>
         </div>
     </div>
 
@@ -183,7 +197,7 @@
             </div>
         </div>
         <div id="eventList">
-            <p style="color: var(--text-sub); font-size: 0.85rem;">危険ないびきや無呼吸パターンが判定されると、直前15秒の音声が保存されます。</p>
+            <p style="color: var(--text-sub); font-size: 0.85rem;">過去3日分の保存データはありません。</p>
         </div>
         <button id="clearBtn" class="btn btn-clear">保存ログをすべて削除</button>
     </div>
@@ -194,15 +208,14 @@
             const SNORE_DB = -30;
             const SPIKE_DB = -20;
             const MIN_SILENCE_SEC = 10;
-            const RETENTION_DAYS = 3; // 3日間保存
+            const RETENTION_DAYS = 3;
 
             let audioContext, analyser, microphone, mediaRecorder;
             let wakeLock = null;
             let isRunning = false;
             let selectedMimeType = '';
-            let db; // IndexedDB instance
+            let db;
             
-            const MAX_TIMELINE_POINTS = 1000; 
             let timelineData = []; 
             let ringBuffer = [];   
             let events = [];       
@@ -220,11 +233,13 @@
             const wakeLockStatus = document.getElementById('wakeLockStatus');
             const mimeStatus = document.getElementById('mimeStatus');
             const canvas = document.getElementById('timelineCanvas');
+            const canvasContainer = document.getElementById('canvasContainer');
+            const timelineWrapper = document.getElementById('timelineWrapper');
             const ctx = canvas.getContext('2d');
             const dimmerOverlay = document.getElementById('dimmerOverlay');
             const noSleepVideo = document.getElementById('noSleepVideo');
 
-            // --- IndexedDB (ローカルストレージ保存機能) ---
+            // IndexedDB 構築
             const dbReq = indexedDB.open('SnoreSASMonitorDB', 1);
             dbReq.onupgradeneeded = (e) => {
                 const database = e.target.result;
@@ -252,7 +267,6 @@
                     const now = Date.now();
                     const expireTime = RETENTION_DAYS * 24 * 60 * 60 * 1000;
                     
-                    // 3日以上古いデータを自動削除
                     events = req.result.filter(item => {
                         if (now - item.timestamp > expireTime) {
                             deleteEventFromDB(item.id);
@@ -281,24 +295,20 @@
                 }
             });
 
+            // タイムライン描画用キャンバスサイズ（スクロール可能設定）
             function resizeCanvas() {
                 if (!canvas) return;
-                const container = canvas.parentElement;
-                const rect = container.getBoundingClientRect();
-                if (rect.width > 0 && rect.height > 0) {
-                    const newWidth = Math.floor(rect.width * window.devicePixelRatio);
-                    const newHeight = Math.floor(rect.height * window.devicePixelRatio);
-                    if (canvas.width !== newWidth || canvas.height !== newHeight) {
-                        canvas.width = newWidth;
-                        canvas.height = newHeight;
-                        drawTimeline();
-                    }
-                }
+                const minWidth = timelineWrapper.clientWidth;
+                // データ1点ごとに3px幅を確保してスクロール可能に設定
+                const calculatedWidth = Math.max(minWidth, timelineData.length * 3);
+                
+                canvasContainer.style.width = calculatedWidth + 'px';
+                canvas.width = calculatedWidth * window.devicePixelRatio;
+                canvas.height = canvasContainer.clientHeight * window.devicePixelRatio;
+                drawTimeline();
             }
 
             window.addEventListener('resize', resizeCanvas);
-            window.addEventListener('orientationchange', () => { setTimeout(resizeCanvas, 200); });
-            resizeCanvas();
 
             function getSupportedMimeType() {
                 const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/aac', 'audio/ogg'];
@@ -333,17 +343,9 @@
                 wakeLockStatus.innerText = "スリープ防止: 解除済み";
             }
 
-            function enableDimmer() {
-                dimmerOverlay.style.display = 'block';
-            }
-
-            function disableDimmer() {
-                dimmerOverlay.style.display = 'none';
-            }
-
-            dimmerOverlay.addEventListener('click', () => {
-                disableDimmer();
-            });
+            function enableDimmer() { dimmerOverlay.style.display = 'block'; }
+            function disableDimmer() { dimmerOverlay.style.display = 'none'; }
+            dimmerOverlay.addEventListener('click', () => { disableDimmer(); });
 
             toggleBtn.addEventListener('click', async () => {
                 if (!isRunning) {
@@ -387,7 +389,7 @@
                     mediaRecorder.ondataavailable = (e) => {
                         if (e.data && e.data.size > 0) {
                             ringBuffer.push(e.data);
-                            if (ringBuffer.length > 15) ringBuffer.shift(); 
+                            if (ringBuffer.length > 15) ringBuffer.shift(); // 直近15秒保持
                         }
                     };
                     mediaRecorder.start(1000); 
@@ -429,35 +431,37 @@
                 let sum = 0;
                 for (let i = 0; i < dataArray.length; i++) sum += dataArray[i] * dataArray[i];
                 let rms = Math.sqrt(sum / dataArray.length);
-                let db = rms > 0 ? 20 * Math.log10(rms / 255) : -100;
-                db = Math.max(-100, Math.min(0, db));
+                let dbVal = rms > 0 ? 20 * Math.log10(rms / 255) : -100;
+                dbVal = Math.max(-100, Math.min(0, dbVal));
 
                 let type = 'normal';
                 totalRecordedSeconds += 1;
 
-                if (db < SILENCE_DB) {
+                if (dbVal < SILENCE_DB) {
                     type = 'silence';
                     currentSilenceSec += 1;
                     if (currentSilenceSec > maxSilenceSec) maxSilenceSec = currentSilenceSec;
                 } else {
-                    if (currentSilenceSec >= MIN_SILENCE_SEC && db > SPIKE_DB) {
+                    if (currentSilenceSec >= MIN_SILENCE_SEC && dbVal > SPIKE_DB) {
                         type = 'alert';
-                        saveEvent('無呼吸疑い（息の吹き返し）', currentSilenceSec, db);
-                    } else if (db > SPIKE_DB) {
+                        saveEvent('無呼吸疑い（息の吹き返し）', currentSilenceSec, dbVal);
+                    } else if (dbVal > SPIKE_DB) {
                         type = 'alert';
-                        saveEvent('巨大いびき検知', 0, db);
-                    } else if (db > SNORE_DB) {
+                        saveEvent('巨大いびき検知', 0, dbVal);
+                    } else if (dbVal > SNORE_DB) {
                         type = 'snore';
                         snoreSeconds += 1;
                     }
                     currentSilenceSec = 0;
                 }
 
-                timelineData.push({ time: new Date().toLocaleTimeString(), db: db, type: type });
-                if (timelineData.length > MAX_TIMELINE_POINTS) timelineData.shift();
+                timelineData.push({ time: new Date().toLocaleTimeString(), db: dbVal, type: type });
 
                 updateSummary();
-                drawTimeline();
+                resizeCanvas();
+                
+                // 自動で右端（最新値）へスクロール
+                timelineWrapper.scrollLeft = timelineWrapper.scrollWidth;
 
                 setTimeout(analyzeLoop, 1000); 
             }
@@ -466,8 +470,8 @@
                 if (ringBuffer.length === 0) return;
 
                 alertCount += 1;
-                const typeOption = selectedMimeType ? { type: selectedMimeType } : {};
-                const blob = new Blob([...ringBuffer], typeOption);
+                const duration = ringBuffer.length; // 実際に記録された秒数
+                const blob = new Blob([...ringBuffer], { type: selectedMimeType || 'audio/webm' });
 
                 const reader = new FileReader();
                 reader.readAsDataURL(blob);
@@ -476,8 +480,10 @@
 
                     const newEvent = {
                         timestamp: Date.now(),
-                        dateStr: new Date().toLocaleDateString() + ' ' + new Date().toLocaleTimeString(),
+                        dateStr: new Date().toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+                        dateOnly: new Date().toLocaleDateString(),
                         label: label,
+                        durationSec: duration,
                         detail: silenceSec > 0 ? `無音: ${silenceSec.toFixed(0)}秒 ➔ 復帰音: ${Math.round(dbVal)}dB` : `音量: ${Math.round(dbVal)}dB`,
                         url: base64AudioUrl,
                         type: silenceSec > 0 ? 'sas' : 'snore'
@@ -496,9 +502,8 @@
                 document.getElementById('summarySnoreRatio').innerText = `${ratio} %`;
             }
 
+            // 時刻目盛り付きタイムライン描画機能
             function drawTimeline() {
-                if (!canvas.width || !canvas.height) resizeCanvas();
-
                 const w = canvas.width;
                 const h = canvas.height;
                 ctx.clearRect(0, 0, w, h);
@@ -506,22 +511,45 @@
                 if (timelineData.length === 0) return;
 
                 const step = w / timelineData.length;
+                const graphHeight = h - (30 * window.devicePixelRatio); // 下部30pxは時刻目盛り用
 
                 for (let i = 0; i < timelineData.length; i++) {
                     const item = timelineData[i];
-                    const barHeight = ((item.db + 100) / 100) * h;
+                    const barHeight = ((item.db + 100) / 100) * graphHeight;
                     const x = i * step;
-                    const y = h - barHeight;
+                    const y = graphHeight - barHeight;
 
-                    if (item.type === 'alert') ctx.fillStyle = '#ff5252';       
-                    else if (item.type === 'snore') ctx.fillStyle = '#ffb300';  
-                    else if (item.type === 'silence') ctx.fillStyle = '#444444';
-                    else ctx.fillStyle = '#00e676';                             
+                    // 音量バーの色分け
+                    if (item.type === 'alert') {
+                        ctx.fillStyle = '#ff5252';       
+                        // 危険検知ポイントに縦ラインマーカーを描画
+                        ctx.fillRect(x, 0, Math.max(2, step), graphHeight);
+                    } else if (item.type === 'snore') {
+                        ctx.fillStyle = '#ffb300';  
+                    } else if (item.type === 'silence') {
+                        ctx.fillStyle = '#333333';
+                    } else {
+                        ctx.fillStyle = '#00e676';                             
+                    }
 
                     ctx.fillRect(x, y, Math.max(2, step - 1), barHeight);
+
+                    // 30データごと（30秒刻み）に時刻の目盛りを描画
+                    if (i % 30 === 0) {
+                        ctx.fillStyle = '#aaaaaa';
+                        ctx.font = `${10 * window.devicePixelRatio}px sans-serif`;
+                        ctx.fillText(item.time, x, h - (5 * window.devicePixelRatio));
+                        
+                        ctx.strokeStyle = '#333333';
+                        ctx.beginPath();
+                        ctx.moveTo(x, graphHeight);
+                        ctx.lineTo(x, graphHeight + (5 * window.devicePixelRatio));
+                        ctx.stroke();
+                    }
                 }
             }
 
+            // 日付ごとに色分けしてイベントログを一覧描画
             function renderEvents() {
                 document.getElementById('eventCount').innerText = events.length;
                 const listEl = document.getElementById('eventList');
@@ -531,16 +559,27 @@
                     return;
                 }
 
-                listEl.innerHTML = events.map(ev => `
-                    <div class="event-item">
-                        <div>
-                            <span class="event-tag ${ev.type === 'sas' ? 'tag-sas' : 'tag-snore'}">${ev.label}</span>
-                            <span style="font-size:0.8rem; color:var(--text-sub);">[${ev.dateStr}]</span>
+                // ユニークな日付を取得して日付インデックスマップを作成
+                const uniqueDates = [...new Set(events.map(ev => ev.dateOnly || ev.dateStr.split(' ')[0]))];
+
+                listEl.innerHTML = events.map(ev => {
+                    const dateKey = ev.dateOnly || ev.dateStr.split(' ')[0];
+                    const dayIndex = uniqueDates.indexOf(dateKey) % 3; // 0, 1, 2のカラーグループに割り当て
+                    const durationText = ev.durationSec ? `（録音長: ${ev.durationSec}秒）` : '';
+
+                    return `
+                        <div class="event-item day-group-${dayIndex}">
+                            <div>
+                                <span class="event-tag ${ev.type === 'sas' ? 'tag-sas' : 'tag-snore'}">${ev.label}</span>
+                                <span style="font-size:0.8rem; color:var(--text-sub);">[${ev.dateStr}]</span>
+                            </div>
+                            <div style="font-size:0.85rem; color:#eee; margin:4px 0;">
+                                ${ev.detail} <span style="color:#81c784; font-size:0.75rem;">${durationText}</span>
+                            </div>
+                            <audio controls controlsList="nodownload" src="${ev.url}"></audio>
                         </div>
-                        <div style="font-size:0.85rem; color:#ccc; margin:4px 0;">${ev.detail}</div>
-                        <audio controls controlsList="nodownload" src="${ev.url}"></audio>
-                    </div>
-                `).join('');
+                    `;
+                }).join('');
             }
         });
     </script>
