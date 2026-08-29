@@ -56,11 +56,12 @@
             font-size: 0.85rem;
         }
         .btn-clear {
-            background: #444;
+            background: #333;
             color: #ff5252;
             padding: 8px;
             font-size: 0.75rem;
-            margin-top: 8px;
+            margin-top: 12px;
+            border: 1px solid #444;
         }
         .summary-grid {
             display: grid;
@@ -79,7 +80,6 @@
             font-weight: bold;
             margin-top: 4px;
         }
-        /* スクロール可能なタイムラインコンテナ */
         .timeline-wrapper {
             width: 100%;
             overflow-x: auto;
@@ -97,17 +97,36 @@
             height: 100%;
             display: block;
         }
-        /* 日付ごとの背景色指定用クラス */
+
+        /* 日付切り替え用タブUI */
+        .tab-container {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 12px;
+            border-bottom: 1px solid #333;
+            padding-bottom: 4px;
+        }
+        .tab-btn {
+            flex: 1;
+            padding: 8px 4px;
+            background: #2a2a2a;
+            color: var(--text-sub);
+            border: none;
+            border-radius: 6px 6px 0 0;
+            font-size: 0.8rem;
+            font-weight: bold;
+            cursor: pointer;
+            text-align: center;
+        }
+        .tab-btn.active {
+            background: var(--accent-green);
+            color: #000000;
+        }
+
         .event-item {
             border-bottom: 1px solid #333;
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 8px;
+            padding: 10px 0;
         }
-        .day-group-0 { background-color: #24282e; } /* 当日 */
-        .day-group-1 { background-color: #1f2a24; } /* 1日前 */
-        .day-group-2 { background-color: #2d232a; } /* 2日前 */
-
         .event-tag {
             display: inline-block;
             padding: 2px 6px;
@@ -191,14 +210,21 @@
     </div>
 
     <div class="card">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-            <div style="font-weight: bold; font-size: 0.9rem;">
-                危険音声保存ログ (過去3日分) (<span id="eventCount">0</span>)
-            </div>
+        <div style="font-weight: bold; font-size: 0.9rem; margin-bottom: 8px;">
+            危険音声保存ログ (過去3日分)
         </div>
+
+        <!-- 日付切り替え用タブバー -->
+        <div class="tab-container" id="tabContainer">
+            <button class="tab-btn active" data-day="0">今日</button>
+            <button class="tab-btn" data-day="1">1日前</button>
+            <button class="tab-btn" data-day="2">2日前</button>
+        </div>
+
         <div id="eventList">
-            <p style="color: var(--text-sub); font-size: 0.85rem;">過去3日分の保存データはありません。</p>
+            <p style="color: var(--text-sub); font-size: 0.85rem;">選択された日の保存データはありません。</p>
         </div>
+        
         <button id="clearBtn" class="btn btn-clear">保存ログをすべて削除</button>
     </div>
 
@@ -215,6 +241,7 @@
             let isRunning = false;
             let selectedMimeType = '';
             let db;
+            let activeDayIndex = 0; // 0:今日, 1:1日前, 2:2日前
             
             let timelineData = []; 
             let ringBuffer = [];   
@@ -238,6 +265,7 @@
             const ctx = canvas.getContext('2d');
             const dimmerOverlay = document.getElementById('dimmerOverlay');
             const noSleepVideo = document.getElementById('noSleepVideo');
+            const tabContainer = document.getElementById('tabContainer');
 
             // IndexedDB 構築
             const dbReq = indexedDB.open('SnoreSASMonitorDB', 1);
@@ -275,6 +303,7 @@
                         return true;
                     }).reverse();
 
+                    updateTabLabels();
                     renderEvents();
                 };
             }
@@ -295,11 +324,34 @@
                 }
             });
 
-            // タイムライン描画用キャンバスサイズ（スクロール可能設定）
+            // タブ選択イベント
+            tabContainer.addEventListener('click', (e) => {
+                if (e.target.classList.contains('tab-btn')) {
+                    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+                    e.target.classList.add('active');
+                    activeDayIndex = parseInt(e.target.getAttribute('data-day'), 10);
+                    renderEvents();
+                }
+            });
+
+            // 日付表記をタブボタン上に反映 (今日, 昨日...)
+            function updateTabLabels() {
+                const today = new Date();
+                const buttons = tabContainer.querySelectorAll('.tab-btn');
+                
+                buttons.forEach((btn, idx) => {
+                    const targetDate = new Date();
+                    targetDate.setDate(today.getDate() - idx);
+                    const dateStr = `${targetDate.getMonth() + 1}/${targetDate.getDate()}`;
+                    if (idx === 0) btn.innerText = `今日 (${dateStr})`;
+                    else if (idx === 1) btn.innerText = `昨日 (${dateStr})`;
+                    else btn.innerText = `${idx}日前 (${dateStr})`;
+                });
+            }
+
             function resizeCanvas() {
                 if (!canvas) return;
                 const minWidth = timelineWrapper.clientWidth;
-                // データ1点ごとに3px幅を確保してスクロール可能に設定
                 const calculatedWidth = Math.max(minWidth, timelineData.length * 3);
                 
                 canvasContainer.style.width = calculatedWidth + 'px';
@@ -389,7 +441,7 @@
                     mediaRecorder.ondataavailable = (e) => {
                         if (e.data && e.data.size > 0) {
                             ringBuffer.push(e.data);
-                            if (ringBuffer.length > 15) ringBuffer.shift(); // 直近15秒保持
+                            if (ringBuffer.length > 15) ringBuffer.shift(); 
                         }
                     };
                     mediaRecorder.start(1000); 
@@ -459,8 +511,6 @@
 
                 updateSummary();
                 resizeCanvas();
-                
-                // 自動で右端（最新値）へスクロール
                 timelineWrapper.scrollLeft = timelineWrapper.scrollWidth;
 
                 setTimeout(analyzeLoop, 1000); 
@@ -470,18 +520,19 @@
                 if (ringBuffer.length === 0) return;
 
                 alertCount += 1;
-                const duration = ringBuffer.length; // 実際に記録された秒数
+                const duration = ringBuffer.length;
                 const blob = new Blob([...ringBuffer], { type: selectedMimeType || 'audio/webm' });
 
                 const reader = new FileReader();
                 reader.readAsDataURL(blob);
                 reader.onloadend = function() {
                     const base64AudioUrl = reader.result;
+                    const nowObj = new Date();
 
                     const newEvent = {
                         timestamp: Date.now(),
-                        dateStr: new Date().toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-                        dateOnly: new Date().toLocaleDateString(),
+                        dateStr: nowObj.toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+                        dateOnly: nowObj.toLocaleDateString('ja-JP'),
                         label: label,
                         durationSec: duration,
                         detail: silenceSec > 0 ? `無音: ${silenceSec.toFixed(0)}秒 ➔ 復帰音: ${Math.round(dbVal)}dB` : `音量: ${Math.round(dbVal)}dB`,
@@ -502,7 +553,6 @@
                 document.getElementById('summarySnoreRatio').innerText = `${ratio} %`;
             }
 
-            // 時刻目盛り付きタイムライン描画機能
             function drawTimeline() {
                 const w = canvas.width;
                 const h = canvas.height;
@@ -511,7 +561,7 @@
                 if (timelineData.length === 0) return;
 
                 const step = w / timelineData.length;
-                const graphHeight = h - (30 * window.devicePixelRatio); // 下部30pxは時刻目盛り用
+                const graphHeight = h - (30 * window.devicePixelRatio);
 
                 for (let i = 0; i < timelineData.length; i++) {
                     const item = timelineData[i];
@@ -519,10 +569,8 @@
                     const x = i * step;
                     const y = graphHeight - barHeight;
 
-                    // 音量バーの色分け
                     if (item.type === 'alert') {
                         ctx.fillStyle = '#ff5252';       
-                        // 危険検知ポイントに縦ラインマーカーを描画
                         ctx.fillRect(x, 0, Math.max(2, step), graphHeight);
                     } else if (item.type === 'snore') {
                         ctx.fillStyle = '#ffb300';  
@@ -534,7 +582,6 @@
 
                     ctx.fillRect(x, y, Math.max(2, step - 1), barHeight);
 
-                    // 30データごと（30秒刻み）に時刻の目盛りを描画
                     if (i % 30 === 0) {
                         ctx.fillStyle = '#aaaaaa';
                         ctx.font = `${10 * window.devicePixelRatio}px sans-serif`;
@@ -549,26 +596,30 @@
                 }
             }
 
-            // 日付ごとに色分けしてイベントログを一覧描画
+            // タブごとにフィルタリングして描画
             function renderEvents() {
-                document.getElementById('eventCount').innerText = events.length;
                 const listEl = document.getElementById('eventList');
                 
-                if (events.length === 0) {
-                    listEl.innerHTML = '<p style="color: var(--text-sub); font-size: 0.85rem;">過去3日分の保存データはありません。</p>';
+                const targetDateObj = new Date();
+                targetDateObj.setDate(targetDateObj.getDate() - activeDayIndex);
+                const targetDateStr = targetDateObj.toLocaleDateString('ja-JP');
+
+                // 選択中タブの日付データのみ抽出
+                const filteredEvents = events.filter(ev => {
+                    const evDate = new Date(ev.timestamp).toLocaleDateString('ja-JP');
+                    return evDate === targetDateStr;
+                });
+
+                if (filteredEvents.length === 0) {
+                    listEl.innerHTML = '<p style="color: var(--text-sub); font-size: 0.85rem; text-align: center; padding: 12px 0;">この日の録音ログはありません。</p>';
                     return;
                 }
 
-                // ユニークな日付を取得して日付インデックスマップを作成
-                const uniqueDates = [...new Set(events.map(ev => ev.dateOnly || ev.dateStr.split(' ')[0]))];
-
-                listEl.innerHTML = events.map(ev => {
-                    const dateKey = ev.dateOnly || ev.dateStr.split(' ')[0];
-                    const dayIndex = uniqueDates.indexOf(dateKey) % 3; // 0, 1, 2のカラーグループに割り当て
+                listEl.innerHTML = filteredEvents.map(ev => {
                     const durationText = ev.durationSec ? `（録音長: ${ev.durationSec}秒）` : '';
 
                     return `
-                        <div class="event-item day-group-${dayIndex}">
+                        <div class="event-item">
                             <div>
                                 <span class="event-tag ${ev.type === 'sas' ? 'tag-sas' : 'tag-snore'}">${ev.label}</span>
                                 <span style="font-size:0.8rem; color:var(--text-sub);">[${ev.dateStr}]</span>
