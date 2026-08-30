@@ -62,6 +62,7 @@
             font-size: 0.75rem;
             margin-top: 12px;
             border: 1px solid #444;
+            width: 100%;
         }
         .summary-grid {
             display: grid;
@@ -80,6 +81,8 @@
             font-weight: bold;
             margin-top: 4px;
         }
+
+        /* 横スクロール対応コンテナ */
         .timeline-wrapper {
             width: 100%;
             overflow-x: auto;
@@ -98,7 +101,6 @@
             display: block;
         }
 
-        /* 日付切り替え用タブUI */
         .tab-container {
             display: flex;
             gap: 4px;
@@ -199,7 +201,7 @@
 
     <div class="card">
         <div style="display: flex; justify-content: space-between; font-size: 0.85rem;">
-            <span>音量タイムライン（横スクロール可能）</span>
+            <span>音量タイムライン (5秒集約・指でスクロール可)</span>
             <span id="liveStatus" style="color: var(--accent-green);">停止中</span>
         </div>
         <div class="timeline-wrapper" id="timelineWrapper">
@@ -214,7 +216,6 @@
             危険音声保存ログ (過去3日分)
         </div>
 
-        <!-- 日付切り替え用タブバー -->
         <div class="tab-container" id="tabContainer">
             <button class="tab-btn active" data-day="0">今日</button>
             <button class="tab-btn" data-day="1">1日前</button>
@@ -222,7 +223,7 @@
         </div>
 
         <div id="eventList">
-            <p style="color: var(--text-sub); font-size: 0.85rem;">選択された日の保存データはありません。</p>
+            <p style="color: var(--text-sub); font-size: 0.85rem; text-align: center;">選択された日の保存データはありません。</p>
         </div>
         
         <button id="clearBtn" class="btn btn-clear">保存ログをすべて削除</button>
@@ -235,15 +236,17 @@
             const SPIKE_DB = -20;
             const MIN_SILENCE_SEC = 10;
             const RETENTION_DAYS = 3;
+            const DOWNSAMPLE_SEC = 5; // 5秒ごとに1データにダウンサンプリング
 
             let audioContext, analyser, microphone, mediaRecorder;
             let wakeLock = null;
             let isRunning = false;
             let selectedMimeType = '';
             let db;
-            let activeDayIndex = 0; // 0:今日, 1:1日前, 2:2日前
+            let activeDayIndex = 0;
             
             let timelineData = []; 
+            let secBuffer = []; // 5秒分の生データを一時保持
             let ringBuffer = [];   
             let events = [];       
 
@@ -324,7 +327,6 @@
                 }
             });
 
-            // タブ選択イベント
             tabContainer.addEventListener('click', (e) => {
                 if (e.target.classList.contains('tab-btn')) {
                     document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
@@ -334,7 +336,6 @@
                 }
             });
 
-            // 日付表記をタブボタン上に反映 (今日, 昨日...)
             function updateTabLabels() {
                 const today = new Date();
                 const buttons = tabContainer.querySelectorAll('.tab-btn');
@@ -349,10 +350,11 @@
                 });
             }
 
+            // 安全な動的キャンバスリサイズ（1データ＝4px幅で無理なく拡張）
             function resizeCanvas() {
                 if (!canvas) return;
                 const minWidth = timelineWrapper.clientWidth;
-                const calculatedWidth = Math.max(minWidth, timelineData.length * 3);
+                const calculatedWidth = Math.max(minWidth, timelineData.length * 4);
                 
                 canvasContainer.style.width = calculatedWidth + 'px';
                 canvas.width = calculatedWidth * window.devicePixelRatio;
@@ -507,21 +509,41 @@
                     currentSilenceSec = 0;
                 }
 
-                timelineData.push({ time: new Date().toLocaleTimeString(), db: dbVal, type: type });
+                // 1秒ごとのデータを一時バッファへ蓄積
+                secBuffer.push({ db: dbVal, type: type, timeStr: new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) });
+
+                // 5秒経過したら最大値（ピーク）を集約してタイムラインデータに登録
+                if (secBuffer.length >= DOWNSAMPLE_SEC) {
+                    const maxItem = secBuffer.reduce((max, item) => item.db > max.db ? item : max, secBuffer[0]);
+                    const hasAlert = secBuffer.some(item => item.type === 'alert');
+                    const hasSnore = secBuffer.some(item => item.type === 'snore');
+                    const finalType = hasAlert ? 'alert' : (hasSnore ? 'snore' : maxItem.type);
+
+                    timelineData.push({
+                        timeStr: maxItem.timeStr,
+                        db: maxItem.db,
+                        type: finalType
+                    });
+
+                    secBuffer = []; // バッファクリア
+                    resizeCanvas();
+                    
+                    // 自動で最新の位置（右端）へスクロール
+                    timelineWrapper.scrollLeft = timelineWrapper.scrollWidth;
+                }
 
                 updateSummary();
-                resizeCanvas();
-                timelineWrapper.scrollLeft = timelineWrapper.scrollWidth;
-
                 setTimeout(analyzeLoop, 1000); 
             }
 
+            // 音声切り出し・保存（ディープコピーでデータ完全化）
             function saveEvent(label, silenceSec, dbVal) {
                 if (ringBuffer.length === 0) return;
 
                 alertCount += 1;
-                const duration = ringBuffer.length;
-                const blob = new Blob([...ringBuffer], { type: selectedMimeType || 'audio/webm' });
+                const audioChunks = ringBuffer.slice(0);
+                const duration = audioChunks.length;
+                const blob = new Blob(audioChunks, { type: selectedMimeType || 'audio/webm' });
 
                 const reader = new FileReader();
                 reader.readAsDataURL(blob);
@@ -553,6 +575,7 @@
                 document.getElementById('summarySnoreRatio').innerText = `${ratio} %`;
             }
 
+            // 軽量＆高可視化タイムライン描画処理
             function drawTimeline() {
                 const w = canvas.width;
                 const h = canvas.height;
@@ -560,8 +583,8 @@
 
                 if (timelineData.length === 0) return;
 
-                const step = w / timelineData.length;
-                const graphHeight = h - (30 * window.devicePixelRatio);
+                const step = w / Math.max(timelineData.length, 1);
+                const graphHeight = h - (25 * window.devicePixelRatio); // 下部25pxは時刻表記用
 
                 for (let i = 0; i < timelineData.length; i++) {
                     const item = timelineData[i];
@@ -571,32 +594,28 @@
 
                     if (item.type === 'alert') {
                         ctx.fillStyle = '#ff5252';       
-                        ctx.fillRect(x, 0, Math.max(2, step), graphHeight);
+                        // 異常検知ポイントには天辺まで届く赤色の縦ラインマーカーを表示
+                        ctx.fillRect(x, 0, Math.max(3, step), graphHeight);
                     } else if (item.type === 'snore') {
                         ctx.fillStyle = '#ffb300';  
+                        ctx.fillRect(x, y, Math.max(2, step - 0.5), barHeight);
                     } else if (item.type === 'silence') {
                         ctx.fillStyle = '#333333';
+                        ctx.fillRect(x, y, Math.max(2, step - 0.5), barHeight);
                     } else {
                         ctx.fillStyle = '#00e676';                             
+                        ctx.fillRect(x, y, Math.max(2, step - 0.5), barHeight);
                     }
 
-                    ctx.fillRect(x, y, Math.max(2, step - 1), barHeight);
-
-                    if (i % 30 === 0) {
+                    // 12データごと（5秒×12＝1分単位）に時刻の目盛りを描画
+                    if (i % 12 === 0) {
                         ctx.fillStyle = '#aaaaaa';
                         ctx.font = `${10 * window.devicePixelRatio}px sans-serif`;
-                        ctx.fillText(item.time, x, h - (5 * window.devicePixelRatio));
-                        
-                        ctx.strokeStyle = '#333333';
-                        ctx.beginPath();
-                        ctx.moveTo(x, graphHeight);
-                        ctx.lineTo(x, graphHeight + (5 * window.devicePixelRatio));
-                        ctx.stroke();
+                        ctx.fillText(item.timeStr, x, h - (5 * window.devicePixelRatio));
                     }
                 }
             }
 
-            // タブごとにフィルタリングして描画
             function renderEvents() {
                 const listEl = document.getElementById('eventList');
                 
@@ -604,7 +623,6 @@
                 targetDateObj.setDate(targetDateObj.getDate() - activeDayIndex);
                 const targetDateStr = targetDateObj.toLocaleDateString('ja-JP');
 
-                // 選択中タブの日付データのみ抽出
                 const filteredEvents = events.filter(ev => {
                     const evDate = new Date(ev.timestamp).toLocaleDateString('ja-JP');
                     return evDate === targetDateStr;
@@ -615,23 +633,21 @@
                     return;
                 }
 
-                listEl.innerHTML = filteredEvents.map(ev => {
-                    const durationText = ev.durationSec ? `（録音長: ${ev.durationSec}秒）` : '';
-
-                    return `
-                        <div class="event-item">
-                            <div>
-                                <span class="event-tag ${ev.type === 'sas' ? 'tag-sas' : 'tag-snore'}">${ev.label}</span>
-                                <span style="font-size:0.8rem; color:var(--text-sub);">[${ev.dateStr}]</span>
-                            </div>
-                            <div style="font-size:0.85rem; color:#eee; margin:4px 0;">
-                                ${ev.detail} <span style="color:#81c784; font-size:0.75rem;">${durationText}</span>
-                            </div>
-                            <audio controls controlsList="nodownload" src="${ev.url}"></audio>
+                listEl.innerHTML = filteredEvents.map(ev => `
+                    <div class="event-item">
+                        <div>
+                            <span class="event-tag ${ev.type === 'sas' ? 'tag-sas' : 'tag-snore'}">${ev.label}</span>
+                            <span style="font-size:0.8rem; color:var(--text-sub);">[${ev.dateStr}]</span>
                         </div>
-                    `;
-                }).join('');
+                        <div style="font-size:0.85rem; color:#eee; margin:4px 0;">
+                            ${ev.detail} <span style="color:#81c784; font-size:0.75rem;">（録音長: ${ev.durationSec || 15}秒）</span>
+                        </div>
+                        <audio controls controlsList="nodownload" src="${ev.url}"></audio>
+                    </div>
+                `).join('');
             }
+
+            resizeCanvas();
         });
     </script>
 </body>
