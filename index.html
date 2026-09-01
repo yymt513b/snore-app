@@ -82,7 +82,6 @@
             margin-top: 4px;
         }
 
-        /* 横スクロール対応コンテナ */
         .timeline-wrapper {
             width: 100%;
             overflow-x: auto;
@@ -201,7 +200,7 @@
 
     <div class="card">
         <div style="display: flex; justify-content: space-between; font-size: 0.85rem;">
-            <span>音量タイムライン (5秒集約・指でスクロール可)</span>
+            <span>音量タイムライン (指でスクロール可)</span>
             <span id="liveStatus" style="color: var(--accent-green);">停止中</span>
         </div>
         <div class="timeline-wrapper" id="timelineWrapper">
@@ -236,7 +235,7 @@
             const SPIKE_DB = -20;
             const MIN_SILENCE_SEC = 10;
             const RETENTION_DAYS = 3;
-            const DOWNSAMPLE_SEC = 5; // 5秒ごとに1データにダウンサンプリング
+            const DOWNSAMPLE_SEC = 5;
 
             let audioContext, analyser, microphone, mediaRecorder;
             let wakeLock = null;
@@ -244,9 +243,10 @@
             let selectedMimeType = '';
             let db;
             let activeDayIndex = 0;
+            let lastSaveTime = 0; // 連打保存防止用タイムスタンプ
             
             let timelineData = []; 
-            let secBuffer = []; // 5秒分の生データを一時保持
+            let secBuffer = []; 
             let ringBuffer = [];   
             let events = [];       
 
@@ -270,23 +270,46 @@
             const noSleepVideo = document.getElementById('noSleepVideo');
             const tabContainer = document.getElementById('tabContainer');
 
-            // IndexedDB 構築
-            const dbReq = indexedDB.open('SnoreSASMonitorDB', 1);
+            // --- IndexedDB DB2.0 (Blob直接保存 ＆ グラフ保存対応) ---
+            const dbReq = indexedDB.open('SnoreSASMonitorDB', 2);
             dbReq.onupgradeneeded = (e) => {
                 const database = e.target.result;
                 if (!database.objectStoreNames.contains('events')) {
                     database.createObjectStore('events', { keyPath: 'id', autoIncrement: true });
                 }
+                if (!database.objectStoreNames.contains('timeline')) {
+                    database.createObjectStore('timeline', { keyPath: 'id', autoIncrement: true });
+                }
             };
             dbReq.onsuccess = (e) => {
                 db = e.target.result;
                 loadEventsFromDB();
+                loadTimelineFromDB();
             };
 
             function saveEventToDB(eventObj) {
                 if (!db) return;
                 const tx = db.transaction('events', 'readwrite');
                 tx.objectStore('events').add(eventObj);
+            }
+
+            function saveTimelineToDB(item) {
+                if (!db) return;
+                const tx = db.transaction('timeline', 'readwrite');
+                tx.objectStore('timeline').add(item);
+            }
+
+            function loadTimelineFromDB() {
+                if (!db) return;
+                const tx = db.transaction('timeline', 'readonly');
+                const store = tx.objectStore('timeline');
+                const req = store.getAll();
+                req.onsuccess = () => {
+                    const now = Date.now();
+                    const expireTime = RETENTION_DAYS * 24 * 60 * 60 * 1000;
+                    timelineData = req.result.filter(item => (now - item.timestamp) <= expireTime);
+                    resizeCanvas();
+                };
             }
 
             function loadEventsFromDB() {
@@ -318,12 +341,17 @@
             }
 
             clearBtn.addEventListener('click', () => {
-                if (confirm("過去3日分の保存音声ログをすべて削除しますか？")) {
+                if (confirm("過去3日分の保存音声ログとグラフデータをすべて削除しますか？")) {
                     if (!db) return;
-                    const tx = db.transaction('events', 'readwrite');
-                    tx.objectStore('events').clear();
+                    const tx1 = db.transaction('events', 'readwrite');
+                    tx1.objectStore('events').clear();
+                    const tx2 = db.transaction('timeline', 'readwrite');
+                    tx2.objectStore('timeline').clear();
+                    
                     events = [];
+                    timelineData = [];
                     renderEvents();
+                    resizeCanvas();
                 }
             });
 
@@ -350,7 +378,6 @@
                 });
             }
 
-            // 安全な動的キャンバスリサイズ（1データ＝4px幅で無理なく拡張）
             function resizeCanvas() {
                 if (!canvas) return;
                 const minWidth = timelineWrapper.clientWidth;
@@ -509,26 +536,26 @@
                     currentSilenceSec = 0;
                 }
 
-                // 1秒ごとのデータを一時バッファへ蓄積
                 secBuffer.push({ db: dbVal, type: type, timeStr: new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) });
 
-                // 5秒経過したら最大値（ピーク）を集約してタイムラインデータに登録
                 if (secBuffer.length >= DOWNSAMPLE_SEC) {
                     const maxItem = secBuffer.reduce((max, item) => item.db > max.db ? item : max, secBuffer[0]);
                     const hasAlert = secBuffer.some(item => item.type === 'alert');
                     const hasSnore = secBuffer.some(item => item.type === 'snore');
                     const finalType = hasAlert ? 'alert' : (hasSnore ? 'snore' : maxItem.type);
 
-                    timelineData.push({
+                    const timelineItem = {
+                        timestamp: Date.now(),
                         timeStr: maxItem.timeStr,
                         db: maxItem.db,
                         type: finalType
-                    });
+                    };
 
-                    secBuffer = []; // バッファクリア
+                    timelineData.push(timelineItem);
+                    saveTimelineToDB(timelineItem);
+
+                    secBuffer = [];
                     resizeCanvas();
-                    
-                    // 自動で最新の位置（右端）へスクロール
                     timelineWrapper.scrollLeft = timelineWrapper.scrollWidth;
                 }
 
@@ -536,36 +563,35 @@
                 setTimeout(analyzeLoop, 1000); 
             }
 
-            // 音声切り出し・保存（ディープコピーでデータ完全化）
+            // 音声切り出し保存（Blob直接書き込み＆連打ガード付き）
             function saveEvent(label, silenceSec, dbVal) {
+                const now = Date.now();
+                // 5秒以内の連続検知は保存をスキップ（破損防止）
+                if (now - lastSaveTime < 5000) return;
+                lastSaveTime = now;
+
                 if (ringBuffer.length === 0) return;
 
                 alertCount += 1;
                 const audioChunks = ringBuffer.slice(0);
                 const duration = audioChunks.length;
                 const blob = new Blob(audioChunks, { type: selectedMimeType || 'audio/webm' });
+                const nowObj = new Date();
 
-                const reader = new FileReader();
-                reader.readAsDataURL(blob);
-                reader.onloadend = function() {
-                    const base64AudioUrl = reader.result;
-                    const nowObj = new Date();
-
-                    const newEvent = {
-                        timestamp: Date.now(),
-                        dateStr: nowObj.toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-                        dateOnly: nowObj.toLocaleDateString('ja-JP'),
-                        label: label,
-                        durationSec: duration,
-                        detail: silenceSec > 0 ? `無音: ${silenceSec.toFixed(0)}秒 ➔ 復帰音: ${Math.round(dbVal)}dB` : `音量: ${Math.round(dbVal)}dB`,
-                        url: base64AudioUrl,
-                        type: silenceSec > 0 ? 'sas' : 'snore'
-                    };
-
-                    saveEventToDB(newEvent);
-                    events.unshift(newEvent);
-                    renderEvents();
+                const newEvent = {
+                    timestamp: now,
+                    dateStr: nowObj.toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+                    dateOnly: nowObj.toLocaleDateString('ja-JP'),
+                    label: label,
+                    durationSec: duration,
+                    detail: silenceSec > 0 ? `無音: ${silenceSec.toFixed(0)}秒 ➔ 復帰音: ${Math.round(dbVal)}dB` : `音量: ${Math.round(dbVal)}dB`,
+                    audioBlob: blob, // Blobオブジェクトを直接DB保存
+                    type: silenceSec > 0 ? 'sas' : 'snore'
                 };
+
+                saveEventToDB(newEvent);
+                events.unshift(newEvent);
+                renderEvents();
             }
 
             function updateSummary() {
@@ -575,7 +601,6 @@
                 document.getElementById('summarySnoreRatio').innerText = `${ratio} %`;
             }
 
-            // 軽量＆高可視化タイムライン描画処理
             function drawTimeline() {
                 const w = canvas.width;
                 const h = canvas.height;
@@ -584,7 +609,7 @@
                 if (timelineData.length === 0) return;
 
                 const step = w / Math.max(timelineData.length, 1);
-                const graphHeight = h - (25 * window.devicePixelRatio); // 下部25pxは時刻表記用
+                const graphHeight = h - (25 * window.devicePixelRatio);
 
                 for (let i = 0; i < timelineData.length; i++) {
                     const item = timelineData[i];
@@ -594,7 +619,6 @@
 
                     if (item.type === 'alert') {
                         ctx.fillStyle = '#ff5252';       
-                        // 異常検知ポイントには天辺まで届く赤色の縦ラインマーカーを表示
                         ctx.fillRect(x, 0, Math.max(3, step), graphHeight);
                     } else if (item.type === 'snore') {
                         ctx.fillStyle = '#ffb300';  
@@ -607,7 +631,6 @@
                         ctx.fillRect(x, y, Math.max(2, step - 0.5), barHeight);
                     }
 
-                    // 12データごと（5秒×12＝1分単位）に時刻の目盛りを描画
                     if (i % 12 === 0) {
                         ctx.fillStyle = '#aaaaaa';
                         ctx.font = `${10 * window.devicePixelRatio}px sans-serif`;
@@ -633,18 +656,28 @@
                     return;
                 }
 
-                listEl.innerHTML = filteredEvents.map(ev => `
-                    <div class="event-item">
-                        <div>
-                            <span class="event-tag ${ev.type === 'sas' ? 'tag-sas' : 'tag-snore'}">${ev.label}</span>
-                            <span style="font-size:0.8rem; color:var(--text-sub);">[${ev.dateStr}]</span>
+                listEl.innerHTML = filteredEvents.map(ev => {
+                    // DB保存されたBlobから正常な再生用URLをその場で安全生成
+                    let playUrl = '';
+                    if (ev.audioBlob) {
+                        playUrl = URL.createObjectURL(ev.audioBlob);
+                    } else if (ev.url) {
+                        playUrl = ev.url;
+                    }
+
+                    return `
+                        <div class="event-item">
+                            <div>
+                                <span class="event-tag ${ev.type === 'sas' ? 'tag-sas' : 'tag-snore'}">${ev.label}</span>
+                                <span style="font-size:0.8rem; color:var(--text-sub);">[${ev.dateStr}]</span>
+                            </div>
+                            <div style="font-size:0.85rem; color:#eee; margin:4px 0;">
+                                ${ev.detail} <span style="color:#81c784; font-size:0.75rem;">（録音長: ${ev.durationSec || 15}秒）</span>
+                            </div>
+                            <audio controls controlsList="nodownload" src="${playUrl}"></audio>
                         </div>
-                        <div style="font-size:0.85rem; color:#eee; margin:4px 0;">
-                            ${ev.detail} <span style="color:#81c784; font-size:0.75rem;">（録音長: ${ev.durationSec || 15}秒）</span>
-                        </div>
-                        <audio controls controlsList="nodownload" src="${ev.url}"></audio>
-                    </div>
-                `).join('');
+                    `;
+                }).join('');
             }
 
             resizeCanvas();
