@@ -243,7 +243,7 @@
             let selectedMimeType = '';
             let db;
             let activeDayIndex = 0;
-            let lastSaveTime = 0; // 連打保存防止用タイムスタンプ
+            let lastSaveTime = 0;
             
             let timelineData = []; 
             let secBuffer = []; 
@@ -270,8 +270,8 @@
             const noSleepVideo = document.getElementById('noSleepVideo');
             const tabContainer = document.getElementById('tabContainer');
 
-            // --- IndexedDB DB2.0 (Blob直接保存 ＆ グラフ保存対応) ---
-            const dbReq = indexedDB.open('SnoreSASMonitorDB', 2);
+            // --- IndexedDB v3 (Base64完全互換保存) ---
+            const dbReq = indexedDB.open('SnoreSASMonitorDB', 3);
             dbReq.onupgradeneeded = (e) => {
                 const database = e.target.result;
                 if (!database.objectStoreNames.contains('events')) {
@@ -563,11 +563,10 @@
                 setTimeout(analyzeLoop, 1000); 
             }
 
-            // 音声切り出し保存（Blob直接書き込み＆連打ガード付き）
+            // 音声切り出し（Base64エンコードの完全保証処理）
             function saveEvent(label, silenceSec, dbVal) {
                 const now = Date.now();
-                // 5秒以内の連続検知は保存をスキップ（破損防止）
-                if (now - lastSaveTime < 5000) return;
+                if (now - lastSaveTime < 5000) return; // 5秒連打防止
                 lastSaveTime = now;
 
                 if (ringBuffer.length === 0) return;
@@ -578,20 +577,27 @@
                 const blob = new Blob(audioChunks, { type: selectedMimeType || 'audio/webm' });
                 const nowObj = new Date();
 
-                const newEvent = {
-                    timestamp: now,
-                    dateStr: nowObj.toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-                    dateOnly: nowObj.toLocaleDateString('ja-JP'),
-                    label: label,
-                    durationSec: duration,
-                    detail: silenceSec > 0 ? `無音: ${silenceSec.toFixed(0)}秒 ➔ 復帰音: ${Math.round(dbVal)}dB` : `音量: ${Math.round(dbVal)}dB`,
-                    audioBlob: blob, // Blobオブジェクトを直接DB保存
-                    type: silenceSec > 0 ? 'sas' : 'snore'
-                };
+                // FileReaderを使ってBase64化してから確実に保存
+                const reader = new FileReader();
+                reader.readAsDataURL(blob);
+                reader.onloadend = function() {
+                    const base64AudioUrl = reader.result;
 
-                saveEventToDB(newEvent);
-                events.unshift(newEvent);
-                renderEvents();
+                    const newEvent = {
+                        timestamp: now,
+                        dateStr: nowObj.toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+                        dateOnly: nowObj.toLocaleDateString('ja-JP'),
+                        label: label,
+                        durationSec: duration,
+                        detail: silenceSec > 0 ? `無音: ${silenceSec.toFixed(0)}秒 ➔ 復帰音: ${Math.round(dbVal)}dB` : `音量: ${Math.round(dbVal)}dB`,
+                        dataUrl: base64AudioUrl, // Base64化された音声データを保存
+                        type: silenceSec > 0 ? 'sas' : 'snore'
+                    };
+
+                    saveEventToDB(newEvent);
+                    events.unshift(newEvent);
+                    renderEvents();
+                };
             }
 
             function updateSummary() {
@@ -657,13 +663,7 @@
                 }
 
                 listEl.innerHTML = filteredEvents.map(ev => {
-                    // DB保存されたBlobから正常な再生用URLをその場で安全生成
-                    let playUrl = '';
-                    if (ev.audioBlob) {
-                        playUrl = URL.createObjectURL(ev.audioBlob);
-                    } else if (ev.url) {
-                        playUrl = ev.url;
-                    }
+                    const audioSrc = ev.dataUrl || ev.url || '';
 
                     return `
                         <div class="event-item">
@@ -674,7 +674,7 @@
                             <div style="font-size:0.85rem; color:#eee; margin:4px 0;">
                                 ${ev.detail} <span style="color:#81c784; font-size:0.75rem;">（録音長: ${ev.durationSec || 15}秒）</span>
                             </div>
-                            <audio controls controlsList="nodownload" src="${playUrl}"></audio>
+                            <audio controls controlsList="nodownload" src="${audioSrc}"></audio>
                         </div>
                     `;
                 }).join('');
