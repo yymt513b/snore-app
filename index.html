@@ -243,6 +243,7 @@
             let selectedMimeType = '';
             let db;
             let activeDayIndex = 0;
+            let isSaving = false; // 保存処理中の排他ロックフラグ
             let lastSaveTime = 0;
             
             let timelineData = []; 
@@ -270,8 +271,8 @@
             const noSleepVideo = document.getElementById('noSleepVideo');
             const tabContainer = document.getElementById('tabContainer');
 
-            // --- IndexedDB v3 (Base64完全互換保存) ---
-            const dbReq = indexedDB.open('SnoreSASMonitorDB', 3);
+            // IndexedDB 構築
+            const dbReq = indexedDB.open('SnoreSASMonitorDB', 4);
             dbReq.onupgradeneeded = (e) => {
                 const database = e.target.result;
                 if (!database.objectStoreNames.contains('events')) {
@@ -563,41 +564,52 @@
                 setTimeout(analyzeLoop, 1000); 
             }
 
-            // 音声切り出し（Base64エンコードの完全保証処理）
+            // 完全同期バッファ固定化対応 saveEvent
             function saveEvent(label, silenceSec, dbVal) {
                 const now = Date.now();
-                if (now - lastSaveTime < 5000) return; // 5秒連打防止
-                lastSaveTime = now;
-
+                if (isSaving || (now - lastSaveTime < 8000)) return; // 8秒間連打ガード
                 if (ringBuffer.length === 0) return;
 
+                isSaving = true;
+                lastSaveTime = now;
+
                 alertCount += 1;
-                const audioChunks = ringBuffer.slice(0);
-                const duration = audioChunks.length;
-                const blob = new Blob(audioChunks, { type: selectedMimeType || 'audio/webm' });
+
+                // 1. その時点の ringBuffer (Blob配列) を完全にディープコピーして同期固定
+                const capturedChunks = Array.from(ringBuffer);
+                const duration = capturedChunks.length;
+                const blob = new Blob(capturedChunks, { type: selectedMimeType || 'audio/webm' });
                 const nowObj = new Date();
 
-                // FileReaderを使ってBase64化してから確実に保存
+                // 2. 固定された Blob から確実に FileReader を実行
                 const reader = new FileReader();
-                reader.readAsDataURL(blob);
                 reader.onloadend = function() {
                     const base64AudioUrl = reader.result;
 
-                    const newEvent = {
-                        timestamp: now,
-                        dateStr: nowObj.toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-                        dateOnly: nowObj.toLocaleDateString('ja-JP'),
-                        label: label,
-                        durationSec: duration,
-                        detail: silenceSec > 0 ? `無音: ${silenceSec.toFixed(0)}秒 ➔ 復帰音: ${Math.round(dbVal)}dB` : `音量: ${Math.round(dbVal)}dB`,
-                        dataUrl: base64AudioUrl, // Base64化された音声データを保存
-                        type: silenceSec > 0 ? 'sas' : 'snore'
-                    };
+                    if (base64AudioUrl && base64AudioUrl.length > 100) {
+                        const newEvent = {
+                            timestamp: now,
+                            dateStr: nowObj.toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+                            dateOnly: nowObj.toLocaleDateString('ja-JP'),
+                            label: label,
+                            durationSec: duration,
+                            detail: silenceSec > 0 ? `無音: ${silenceSec.toFixed(0)}秒 ➔ 復帰音: ${Math.round(dbVal)}dB` : `音量: ${Math.round(dbVal)}dB`,
+                            dataUrl: base64AudioUrl,
+                            type: silenceSec > 0 ? 'sas' : 'snore'
+                        };
 
-                    saveEventToDB(newEvent);
-                    events.unshift(newEvent);
-                    renderEvents();
+                        saveEventToDB(newEvent);
+                        events.unshift(newEvent);
+                        renderEvents();
+                    }
+                    isSaving = false; // ロック解除
                 };
+
+                reader.onerror = function() {
+                    isSaving = false;
+                };
+
+                reader.readAsDataURL(blob);
             }
 
             function updateSummary() {
