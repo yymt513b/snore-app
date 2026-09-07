@@ -243,7 +243,7 @@
             let selectedMimeType = '';
             let db;
             let activeDayIndex = 0;
-            let isSaving = false; // 保存処理中の排他ロックフラグ
+            let isSaving = false;
             let lastSaveTime = 0;
             
             let timelineData = []; 
@@ -271,8 +271,27 @@
             const noSleepVideo = document.getElementById('noSleepVideo');
             const tabContainer = document.getElementById('tabContainer');
 
+            // Base64からBlobへ変換するユーティリティ関数
+            function base64ToBlob(base64Data, contentType = 'audio/webm') {
+                try {
+                    const parts = base64Data.split(';base64,');
+                    const mime = parts[0].replace('data:', '') || contentType;
+                    const b64 = parts[1] || parts[0];
+                    const binaryStr = atob(b64);
+                    const len = binaryStr.length;
+                    const bytes = new Uint8Array(len);
+                    for (let i = 0; i < len; i++) {
+                        bytes[i] = binaryStr.charCodeAt(i);
+                    }
+                    return new Blob([bytes], { type: mime });
+                } catch (e) {
+                    console.error("Base64 decode error:", e);
+                    return null;
+                }
+            }
+
             // IndexedDB 構築
-            const dbReq = indexedDB.open('SnoreSASMonitorDB', 4);
+            const dbReq = indexedDB.open('SnoreSASMonitorDB', 5);
             dbReq.onupgradeneeded = (e) => {
                 const database = e.target.result;
                 if (!database.objectStoreNames.contains('events')) {
@@ -309,7 +328,10 @@
                     const now = Date.now();
                     const expireTime = RETENTION_DAYS * 24 * 60 * 60 * 1000;
                     timelineData = req.result.filter(item => (now - item.timestamp) <= expireTime);
+                    
+                    // 読み込み完了後にキャンバスサイズ更新と描画を実行
                     resizeCanvas();
+                    timelineWrapper.scrollLeft = timelineWrapper.scrollWidth;
                 };
             }
 
@@ -382,6 +404,7 @@
             function resizeCanvas() {
                 if (!canvas) return;
                 const minWidth = timelineWrapper.clientWidth;
+                // データ1点あたり 4px の幅を確保して横スクロールを可能にする
                 const calculatedWidth = Math.max(minWidth, timelineData.length * 4);
                 
                 canvasContainer.style.width = calculatedWidth + 'px';
@@ -564,10 +587,9 @@
                 setTimeout(analyzeLoop, 1000); 
             }
 
-            // 完全同期バッファ固定化対応 saveEvent
             function saveEvent(label, silenceSec, dbVal) {
                 const now = Date.now();
-                if (isSaving || (now - lastSaveTime < 8000)) return; // 8秒間連打ガード
+                if (isSaving || (now - lastSaveTime < 8000)) return;
                 if (ringBuffer.length === 0) return;
 
                 isSaving = true;
@@ -575,13 +597,12 @@
 
                 alertCount += 1;
 
-                // 1. その時点の ringBuffer (Blob配列) を完全にディープコピーして同期固定
                 const capturedChunks = Array.from(ringBuffer);
                 const duration = capturedChunks.length;
-                const blob = new Blob(capturedChunks, { type: selectedMimeType || 'audio/webm' });
+                const mimeType = selectedMimeType || 'audio/webm';
+                const blob = new Blob(capturedChunks, { type: mimeType });
                 const nowObj = new Date();
 
-                // 2. 固定された Blob から確実に FileReader を実行
                 const reader = new FileReader();
                 reader.onloadend = function() {
                     const base64AudioUrl = reader.result;
@@ -595,6 +616,7 @@
                             durationSec: duration,
                             detail: silenceSec > 0 ? `無音: ${silenceSec.toFixed(0)}秒 ➔ 復帰音: ${Math.round(dbVal)}dB` : `音量: ${Math.round(dbVal)}dB`,
                             dataUrl: base64AudioUrl,
+                            mimeType: mimeType,
                             type: silenceSec > 0 ? 'sas' : 'snore'
                         };
 
@@ -602,7 +624,7 @@
                         events.unshift(newEvent);
                         renderEvents();
                     }
-                    isSaving = false; // ロック解除
+                    isSaving = false;
                 };
 
                 reader.onerror = function() {
@@ -675,7 +697,18 @@
                 }
 
                 listEl.innerHTML = filteredEvents.map(ev => {
-                    const audioSrc = ev.dataUrl || ev.url || '';
+                    let playUrl = '';
+                    const rawData = ev.dataUrl || ev.url || '';
+                    
+                    // Android Chromeで確実に再生させるため、Base64からBlobに逆変換してBlob URLを発行
+                    if (rawData.startsWith('data:')) {
+                        const blob = base64ToBlob(rawData, ev.mimeType || 'audio/webm');
+                        if (blob) {
+                            playUrl = URL.createObjectURL(blob);
+                        }
+                    } else {
+                        playUrl = rawData;
+                    }
 
                     return `
                         <div class="event-item">
@@ -686,7 +719,7 @@
                             <div style="font-size:0.85rem; color:#eee; margin:4px 0;">
                                 ${ev.detail} <span style="color:#81c784; font-size:0.75rem;">（録音長: ${ev.durationSec || 15}秒）</span>
                             </div>
-                            <audio controls controlsList="nodownload" src="${audioSrc}"></audio>
+                            <audio controls controlsList="nodownload" preload="metadata" src="${playUrl}"></audio>
                         </div>
                     `;
                 }).join('');
