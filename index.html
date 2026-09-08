@@ -177,7 +177,7 @@
         <button id="toggleBtn" class="btn">計測を開始する</button>
         <button id="testBtn" class="btn btn-test">動作テスト（15秒切り出し再生）</button>
         <div id="wakeLockStatus" class="note">スリープ防止: 未設定</div>
-        <div id="mimeStatus" class="note" style="color:#81c784; margin-top:4px;"></div>
+        <div id="mimeStatus" class="note" style="color:#81c784; margin-top:4px;">録音形式: WAV (PCM 16bit)</div>
     </div>
 
     <div class="card">
@@ -236,19 +236,22 @@
             const MIN_SILENCE_SEC = 10;
             const RETENTION_DAYS = 3;
             const DOWNSAMPLE_SEC = 5;
+            const BUFFER_SECONDS = 15; // 15秒リングバッファ
 
-            let audioContext, analyser, microphone, mediaRecorder;
+            let audioContext, microphone, scriptNode;
             let wakeLock = null;
             let isRunning = false;
-            let selectedMimeType = '';
             let db;
             let activeDayIndex = 0;
-            let isSaving = false;
             let lastSaveTime = 0;
             
+            // WAV用15秒PCMリングバッファ
+            let pcmRingBuffer = null;
+            let pcmWriteIndex = 0;
+            let sampleRate = 44100;
+
             let timelineData = []; 
             let secBuffer = []; 
-            let ringBuffer = [];   
             let events = [];       
 
             let currentSilenceSec = 0;
@@ -256,13 +259,13 @@
             let alertCount = 0;
             let snoreSeconds = 0;
             let totalRecordedSeconds = 0;
+            let lastAnalyzeTime = Date.now();
 
             const toggleBtn = document.getElementById('toggleBtn');
             const testBtn = document.getElementById('testBtn');
             const clearBtn = document.getElementById('clearBtn');
             const liveStatus = document.getElementById('liveStatus');
             const wakeLockStatus = document.getElementById('wakeLockStatus');
-            const mimeStatus = document.getElementById('mimeStatus');
             const canvas = document.getElementById('timelineCanvas');
             const canvasContainer = document.getElementById('canvasContainer');
             const timelineWrapper = document.getElementById('timelineWrapper');
@@ -271,27 +274,8 @@
             const noSleepVideo = document.getElementById('noSleepVideo');
             const tabContainer = document.getElementById('tabContainer');
 
-            // Base64からBlobへ変換するユーティリティ関数
-            function base64ToBlob(base64Data, contentType = 'audio/webm') {
-                try {
-                    const parts = base64Data.split(';base64,');
-                    const mime = parts[0].replace('data:', '') || contentType;
-                    const b64 = parts[1] || parts[0];
-                    const binaryStr = atob(b64);
-                    const len = binaryStr.length;
-                    const bytes = new Uint8Array(len);
-                    for (let i = 0; i < len; i++) {
-                        bytes[i] = binaryStr.charCodeAt(i);
-                    }
-                    return new Blob([bytes], { type: mime });
-                } catch (e) {
-                    console.error("Base64 decode error:", e);
-                    return null;
-                }
-            }
-
-            // IndexedDB 構築
-            const dbReq = indexedDB.open('SnoreSASMonitorDB', 5);
+            // --- IndexedDB DB v6 ---
+            const dbReq = indexedDB.open('SnoreSASMonitorDB', 6);
             dbReq.onupgradeneeded = (e) => {
                 const database = e.target.result;
                 if (!database.objectStoreNames.contains('events')) {
@@ -328,8 +312,6 @@
                     const now = Date.now();
                     const expireTime = RETENTION_DAYS * 24 * 60 * 60 * 1000;
                     timelineData = req.result.filter(item => (now - item.timestamp) <= expireTime);
-                    
-                    // 読み込み完了後にキャンバスサイズ更新と描画を実行
                     resizeCanvas();
                     timelineWrapper.scrollLeft = timelineWrapper.scrollWidth;
                 };
@@ -404,7 +386,6 @@
             function resizeCanvas() {
                 if (!canvas) return;
                 const minWidth = timelineWrapper.clientWidth;
-                // データ1点あたり 4px の幅を確保して横スクロールを可能にする
                 const calculatedWidth = Math.max(minWidth, timelineData.length * 4);
                 
                 canvasContainer.style.width = calculatedWidth + 'px';
@@ -414,14 +395,6 @@
             }
 
             window.addEventListener('resize', resizeCanvas);
-
-            function getSupportedMimeType() {
-                const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/aac', 'audio/ogg'];
-                for (let t of types) {
-                    if (MediaRecorder.isTypeSupported(t)) return t;
-                }
-                return '';
-            }
 
             async function enableNoSleep() {
                 try {
@@ -478,26 +451,34 @@
                         await audioContext.resume();
                     }
 
-                    analyser = audioContext.createAnalyser();
-                    analyser.fftSize = 512;
+                    sampleRate = audioContext.sampleRate;
+                    const bufferSize = sampleRate * BUFFER_SECONDS;
+                    pcmRingBuffer = new Float32Array(bufferSize);
+                    pcmWriteIndex = 0;
 
                     microphone = audioContext.createMediaStreamSource(stream);
-                    microphone.connect(analyser);
+                    scriptNode = audioContext.createScriptProcessor(2048, 1, 1);
 
-                    selectedMimeType = getSupportedMimeType();
-                    const options = selectedMimeType ? { mimeType: selectedMimeType } : {};
-                    mediaRecorder = new MediaRecorder(stream, options);
+                    microphone.connect(scriptNode);
+                    scriptNode.connect(audioContext.destination);
 
-                    mimeStatus.innerText = "録音形式: " + (selectedMimeType || "デフォルト");
+                    scriptNode.onaudioprocess = (e) => {
+                        if (!isRunning) return;
+                        const input = e.inputBuffer.getChannelData(0);
 
-                    ringBuffer = [];
-                    mediaRecorder.ondataavailable = (e) => {
-                        if (e.data && e.data.size > 0) {
-                            ringBuffer.push(e.data);
-                            if (ringBuffer.length > 15) ringBuffer.shift(); 
+                        // 1. PCM音声をリングバッファに追記
+                        for (let i = 0; i < input.length; i++) {
+                            pcmRingBuffer[pcmWriteIndex] = input[i];
+                            pcmWriteIndex = (pcmWriteIndex + 1) % bufferSize;
+                        }
+
+                        // 2. 1秒ごとに音量(dB)計算とSAS判定
+                        const now = Date.now();
+                        if (now - lastAnalyzeTime >= 1000) {
+                            lastAnalyzeTime = now;
+                            processAudioFrame(input);
                         }
                     };
-                    mediaRecorder.start(1000); 
 
                     isRunning = true;
                     toggleBtn.innerText = "計測を停止する";
@@ -508,35 +489,16 @@
                     enableDimmer();
 
                     resizeCanvas();
-                    analyzeLoop();
                 } catch (err) {
                     alert("マイクの起動に失敗しました: " + err.message);
                 }
             }
 
-            function stopRecording() {
-                isRunning = false;
-                if (audioContext) audioContext.close();
-                if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
-                
-                disableNoSleep();
-                disableDimmer();
-
-                toggleBtn.innerText = "計測を開始する";
-                toggleBtn.style.background = "var(--accent-green)";
-                liveStatus.innerText = "停止中";
-            }
-
-            function analyzeLoop() {
-                if (!isRunning) return;
-
-                const dataArray = new Uint8Array(analyser.frequencyBinCount);
-                analyser.getByteFrequencyData(dataArray);
-
+            function processAudioFrame(inputData) {
                 let sum = 0;
-                for (let i = 0; i < dataArray.length; i++) sum += dataArray[i] * dataArray[i];
-                let rms = Math.sqrt(sum / dataArray.length);
-                let dbVal = rms > 0 ? 20 * Math.log10(rms / 255) : -100;
+                for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
+                let rms = Math.sqrt(sum / inputData.length);
+                let dbVal = rms > 0 ? 20 * Math.log10(rms) : -100;
                 dbVal = Math.max(-100, Math.min(0, dbVal));
 
                 let type = 'normal';
@@ -584,54 +546,92 @@
                 }
 
                 updateSummary();
-                setTimeout(analyzeLoop, 1000); 
+            }
+
+            function stopRecording() {
+                isRunning = false;
+                if (scriptNode) scriptNode.disconnect();
+                if (microphone) microphone.disconnect();
+                if (audioContext) audioContext.close();
+                
+                disableNoSleep();
+                disableDimmer();
+
+                toggleBtn.innerText = "計測を開始する";
+                toggleBtn.style.background = "var(--accent-green)";
+                liveStatus.innerText = "停止中";
+            }
+
+            // 15秒分のPCMデータをWAV（Base64 DataURL）に変換生成する標準WAVエンコーダー
+            function generate15SecWavDataUrl() {
+                if (!pcmRingBuffer) return '';
+                const totalSamples = pcmRingBuffer.length;
+                const buffer = new ArrayBuffer(44 + totalSamples * 2);
+                const view = new DataView(buffer);
+
+                // RIFF Header
+                writeString(view, 0, 'RIFF');
+                view.setUint32(4, 36 + totalSamples * 2, true);
+                writeString(view, 8, 'WAVE');
+                writeString(view, 12, 'fmt ');
+                view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
+                view.setUint16(20, 1, true);  // AudioFormat (1 for PCM)
+                view.setUint16(22, 1, true);  // NumChannels (1 mono)
+                view.setUint32(24, sampleRate, true);
+                view.setUint32(28, sampleRate * 2, true); // ByteRate
+                view.setUint16(32, 2, true);  // BlockAlign
+                view.setUint16(34, 16, true); // BitsPerSample
+                writeString(view, 36, 'data');
+                view.setUint32(40, totalSamples * 2, true);
+
+                // Float32 -> PCM 16bit Conversion
+                let offset = 44;
+                for (let i = 0; i < totalSamples; i++, offset += 2) {
+                    const readIdx = (pcmWriteIndex + i) % totalSamples;
+                    const s = Math.max(-1, Math.min(1, pcmRingBuffer[readIdx]));
+                    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+                }
+
+                // ArrayBuffer -> Base64
+                let binary = '';
+                const bytes = new Uint8Array(buffer);
+                const len = bytes.byteLength;
+                for (let i = 0; i < len; i++) {
+                    binary += String.fromCharCode(bytes[i]);
+                }
+                return 'data:audio/wav;base64,' + btoa(binary);
+            }
+
+            function writeString(view, offset, string) {
+                for (let i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
+                }
             }
 
             function saveEvent(label, silenceSec, dbVal) {
                 const now = Date.now();
-                if (isSaving || (now - lastSaveTime < 8000)) return;
-                if (ringBuffer.length === 0) return;
-
-                isSaving = true;
+                if (now - lastSaveTime < 5000) return; // 5秒間連打ガード
                 lastSaveTime = now;
 
                 alertCount += 1;
+                const wavDataUrl = generate15SecWavDataUrl();
+                if (!wavDataUrl) return;
 
-                const capturedChunks = Array.from(ringBuffer);
-                const duration = capturedChunks.length;
-                const mimeType = selectedMimeType || 'audio/webm';
-                const blob = new Blob(capturedChunks, { type: mimeType });
                 const nowObj = new Date();
-
-                const reader = new FileReader();
-                reader.onloadend = function() {
-                    const base64AudioUrl = reader.result;
-
-                    if (base64AudioUrl && base64AudioUrl.length > 100) {
-                        const newEvent = {
-                            timestamp: now,
-                            dateStr: nowObj.toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-                            dateOnly: nowObj.toLocaleDateString('ja-JP'),
-                            label: label,
-                            durationSec: duration,
-                            detail: silenceSec > 0 ? `無音: ${silenceSec.toFixed(0)}秒 ➔ 復帰音: ${Math.round(dbVal)}dB` : `音量: ${Math.round(dbVal)}dB`,
-                            dataUrl: base64AudioUrl,
-                            mimeType: mimeType,
-                            type: silenceSec > 0 ? 'sas' : 'snore'
-                        };
-
-                        saveEventToDB(newEvent);
-                        events.unshift(newEvent);
-                        renderEvents();
-                    }
-                    isSaving = false;
+                const newEvent = {
+                    timestamp: now,
+                    dateStr: nowObj.toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+                    dateOnly: nowObj.toLocaleDateString('ja-JP'),
+                    label: label,
+                    durationSec: 15,
+                    detail: silenceSec > 0 ? `無音: ${silenceSec.toFixed(0)}秒 ➔ 復帰音: ${Math.round(dbVal)}dB` : `音量: ${Math.round(dbVal)}dB`,
+                    dataUrl: wavDataUrl,
+                    type: silenceSec > 0 ? 'sas' : 'snore'
                 };
 
-                reader.onerror = function() {
-                    isSaving = false;
-                };
-
-                reader.readAsDataURL(blob);
+                saveEventToDB(newEvent);
+                events.unshift(newEvent);
+                renderEvents();
             }
 
             function updateSummary() {
@@ -696,33 +696,18 @@
                     return;
                 }
 
-                listEl.innerHTML = filteredEvents.map(ev => {
-                    let playUrl = '';
-                    const rawData = ev.dataUrl || ev.url || '';
-                    
-                    // Android Chromeで確実に再生させるため、Base64からBlobに逆変換してBlob URLを発行
-                    if (rawData.startsWith('data:')) {
-                        const blob = base64ToBlob(rawData, ev.mimeType || 'audio/webm');
-                        if (blob) {
-                            playUrl = URL.createObjectURL(blob);
-                        }
-                    } else {
-                        playUrl = rawData;
-                    }
-
-                    return `
-                        <div class="event-item">
-                            <div>
-                                <span class="event-tag ${ev.type === 'sas' ? 'tag-sas' : 'tag-snore'}">${ev.label}</span>
-                                <span style="font-size:0.8rem; color:var(--text-sub);">[${ev.dateStr}]</span>
-                            </div>
-                            <div style="font-size:0.85rem; color:#eee; margin:4px 0;">
-                                ${ev.detail} <span style="color:#81c784; font-size:0.75rem;">（録音長: ${ev.durationSec || 15}秒）</span>
-                            </div>
-                            <audio controls controlsList="nodownload" preload="metadata" src="${playUrl}"></audio>
+                listEl.innerHTML = filteredEvents.map(ev => `
+                    <div class="event-item">
+                        <div>
+                            <span class="event-tag ${ev.type === 'sas' ? 'tag-sas' : 'tag-snore'}">${ev.label}</span>
+                            <span style="font-size:0.8rem; color:var(--text-sub);">[${ev.dateStr}]</span>
                         </div>
-                    `;
-                }).join('');
+                        <div style="font-size:0.85rem; color:#eee; margin:4px 0;">
+                            ${ev.detail} <span style="color:#81c784; font-size:0.75rem;">（録音長: ${ev.durationSec || 15}秒）</span>
+                        </div>
+                        <audio controls controlsList="nodownload" preload="auto" src="${ev.dataUrl}"></audio>
+                    </div>
+                `).join('');
             }
 
             resizeCanvas();
