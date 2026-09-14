@@ -265,7 +265,8 @@
             let db;
             let activeDayIndex = 0;
             let lastSaveTime = 0;
-            let currentZoom = 1.0; // ズーム倍率 (0.5 ~ 4.0)
+            let currentZoom = 1.0; 
+            let activeHighlightIndex = -1; // 現在再生中のハイライト位置
             
             let pcmRingBuffer = null;
             let pcmWriteIndex = 0;
@@ -424,25 +425,53 @@
                 });
             }
 
-            // ズーム倍率（currentZoom）が確実に反映されるリサイズ関数
+            // CSS幅・描画幅双方にズーム倍率を完全連動させる修復関数
             function resizeCanvas() {
                 if (!canvas || !timelineWrapper) return;
                 const minWidth = timelineWrapper.clientWidth || 300;
                 
-                // 100%基準時のベース幅を計算（データ1点あたり4px、最低でも画面幅以上）
-                const baseWidth = Math.max(minWidth, timelineData.length * 4);
+                const basePx = 4;
+                const dataWidth = timelineData.length * basePx;
+                const baseWidth = Math.max(minWidth, dataWidth);
                 
-                // ズーム倍率（currentZoom）を掛け合わせてキャンバスの幅を拡張（最大6000px制限）
-                const calculatedWidth = Math.min(6000, Math.round(baseWidth * currentZoom));
+                const calculatedWidth = Math.min(8000, Math.round(baseWidth * currentZoom));
                 const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
                 canvasContainer.style.width = calculatedWidth + 'px';
-                canvas.width = calculatedWidth * dpr;
+                canvas.style.width = calculatedWidth + 'px'; // <--- CSS表示幅を直接拡大
                 canvas.height = canvasContainer.clientHeight * dpr;
+                canvas.width = calculatedWidth * dpr;
                 drawTimeline();
             }
 
             window.addEventListener('resize', resizeCanvas);
+
+            // 音声タイムスタンプからグラフの位置へスクロール＆ハイライト
+            function scrollToTimelineTimestamp(ts) {
+                if (!timelineData || timelineData.length === 0) return;
+                
+                let closestIdx = 0;
+                let minDiff = Infinity;
+                for (let i = 0; i < timelineData.length; i++) {
+                    const diff = Math.abs(timelineData[i].timestamp - ts);
+                    if (diff < minDiff) {
+                        minDiff = diff;
+                        closestIdx = i;
+                    }
+                }
+                
+                activeHighlightIndex = closestIdx;
+                drawTimeline();
+
+                const wrapperWidth = timelineWrapper.clientWidth;
+                const containerWidth = parseFloat(canvasContainer.style.width) || wrapperWidth;
+                const targetX = (closestIdx / timelineData.length) * containerWidth;
+                
+                timelineWrapper.scrollTo({
+                    left: Math.max(0, targetX - (wrapperWidth / 2)),
+                    behavior: 'smooth'
+                });
+            }
 
             async function enableNoSleep() {
                 try {
@@ -729,7 +758,7 @@
                         ctx.fillRect(x, y, barWidth, barHeight);
                     }
 
-                    // 目盛り線と時刻テキスト（純白 bold）
+                    // 時刻目盛り
                     const labelInterval = Math.max(4, Math.floor(70 / Math.max(1, step / dpr)));
                     if (i % Math.floor(labelInterval) === 0) {
                         ctx.strokeStyle = '#555555';
@@ -742,6 +771,22 @@
                         ctx.font = `bold ${11 * dpr}px sans-serif`;
                         ctx.fillText(item.timeStr, x + (2 * dpr), h - (6 * dpr));
                     }
+                }
+
+                // 音声再生中のアクティブ・ハイライト表示（黄色カーソル）
+                if (activeHighlightIndex >= 0 && activeHighlightIndex < timelineData.length) {
+                    const hX = activeHighlightIndex * step;
+                    ctx.strokeStyle = '#ffff00';
+                    ctx.lineWidth = 3 * dpr;
+                    ctx.beginPath();
+                    ctx.moveTo(hX, 0);
+                    ctx.lineTo(hX, graphHeight);
+                    ctx.stroke();
+
+                    ctx.fillStyle = '#ffff00';
+                    ctx.beginPath();
+                    ctx.arc(hX, 10 * dpr, 6 * dpr, 0, Math.PI * 2);
+                    ctx.fill();
                 }
             }
 
@@ -771,9 +816,17 @@
                         <div style="font-size:0.85rem; color:#eee; margin:4px 0;">
                             ${ev.detail} <span style="color:#81c784; font-size:0.75rem;">（録音長: ${ev.durationSec || 15}秒）</span>
                         </div>
-                        <audio controls controlsList="nodownload" preload="auto" src="${ev.dataUrl}"></audio>
+                        <audio controls controlsList="nodownload" preload="auto" data-timestamp="${ev.timestamp}" src="${ev.dataUrl}"></audio>
                     </div>
                 `).join('');
+
+                // 音声再生(play)イベントリスナーを付与（グラフ連動用）
+                listEl.querySelectorAll('audio').forEach(audioEl => {
+                    audioEl.addEventListener('play', () => {
+                        const ts = parseInt(audioEl.getAttribute('data-timestamp'), 10);
+                        if (ts) scrollToTimelineTimestamp(ts);
+                    });
+                });
             }
 
             resizeCanvas();
