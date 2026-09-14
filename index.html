@@ -85,10 +85,10 @@
         .zoom-btn {
             background: #2c2c2e;
             color: #ffffff;
-            border: 1px solid #444;
-            border-radius: 4px;
-            padding: 3px 8px;
-            font-size: 0.75rem;
+            border: 1px solid #555;
+            border-radius: 6px;
+            padding: 5px 10px;
+            font-size: 0.8rem;
             font-weight: bold;
             cursor: pointer;
         }
@@ -219,7 +219,7 @@
             <span>音量タイムライン</span>
             <div style="display: flex; align-items: center; gap: 6px;">
                 <button id="zoomOutBtn" class="zoom-btn">－ 縮小</button>
-                <span id="zoomLabel" style="font-size: 0.75rem; font-weight: bold; color: #00e676; min-width: 38px; text-align: center;">100%</span>
+                <span id="zoomLabel" style="font-size: 0.8rem; font-weight: bold; color: #00e676; min-width: 42px; text-align: center;">100%</span>
                 <button id="zoomInBtn" class="zoom-btn">＋ 拡大</button>
                 <span id="liveStatus" style="color: var(--accent-green); font-weight: bold; margin-left: 4px;">停止中</span>
             </div>
@@ -424,14 +424,16 @@
                 });
             }
 
-            // ズーム倍率対応キャンバスリサイズ関数
+            // ズーム倍率（currentZoom）が確実に反映されるリサイズ関数
             function resizeCanvas() {
-                if (!canvas) return;
-                const minWidth = timelineWrapper.clientWidth;
+                if (!canvas || !timelineWrapper) return;
+                const minWidth = timelineWrapper.clientWidth || 300;
                 
-                // 1データあたりの幅 (標準4px * 倍率)
-                const basePx = 4 * currentZoom;
-                const calculatedWidth = Math.min(8000, Math.max(minWidth, timelineData.length * basePx));
+                // 100%基準時のベース幅を計算（データ1点あたり4px、最低でも画面幅以上）
+                const baseWidth = Math.max(minWidth, timelineData.length * 4);
+                
+                // ズーム倍率（currentZoom）を掛け合わせてキャンバスの幅を拡張（最大6000px制限）
+                const calculatedWidth = Math.min(6000, Math.round(baseWidth * currentZoom));
                 const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
                 canvasContainer.style.width = calculatedWidth + 'px';
@@ -681,13 +683,11 @@
                 document.getElementById('summarySnoreRatio').innerText = `${ratio} %`;
             }
 
-            // 高コントラスト＆くっきり時刻表記の描画ロジック
             function drawTimeline() {
                 const w = canvas.width;
                 const h = canvas.height;
                 const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
-                // 暗い背景
                 ctx.fillStyle = '#0a0a0a';
                 ctx.fillRect(0, 0, w, h);
 
@@ -697,7 +697,7 @@
                 const textHeight = 28 * dpr;
                 const graphHeight = h - textHeight;
 
-                // 参照ガイドライン（横線）
+                // 参照ガイドライン
                 ctx.strokeStyle = '#222222';
                 ctx.lineWidth = 1 * dpr;
                 for (let db = -80; db <= -20; db += 20) {
@@ -715,23 +715,22 @@
                     const y = graphHeight - barHeight;
                     const barWidth = Math.max(1.5, step - 0.5);
 
-                    // 高発色カラー
                     if (item.type === 'alert') {
-                        ctx.fillStyle = '#ff1744'; // 鮮烈な赤
+                        ctx.fillStyle = '#ff1744'; 
                         ctx.fillRect(x, 0, Math.max(3 * dpr, step), graphHeight);
                     } else if (item.type === 'snore') {
-                        ctx.fillStyle = '#ffab00'; // 鮮やかなアンバーオレンジ
+                        ctx.fillStyle = '#ffab00'; 
                         ctx.fillRect(x, y, barWidth, barHeight);
                     } else if (item.type === 'silence') {
-                        ctx.fillStyle = '#4a5568'; // 見やすい青みのある明るめグレー
+                        ctx.fillStyle = '#4a5568'; 
                         ctx.fillRect(x, y, barWidth, barHeight);
                     } else {
-                        ctx.fillStyle = '#00ff7f'; // 鮮やかなスプリンググリーン
+                        ctx.fillStyle = '#00ff7f'; 
                         ctx.fillRect(x, y, barWidth, barHeight);
                     }
 
-                    // 目盛り線と時刻テキスト（純白 bold で可読性大幅UP）
-                    const labelInterval = Math.max(6, Math.floor(70 / Math.max(1, step / dpr)));
+                    // 目盛り線と時刻テキスト（純白 bold）
+                    const labelInterval = Math.max(4, Math.floor(70 / Math.max(1, step / dpr)));
                     if (i % Math.floor(labelInterval) === 0) {
                         ctx.strokeStyle = '#555555';
                         ctx.beginPath();
