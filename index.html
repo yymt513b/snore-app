@@ -82,6 +82,21 @@
             margin-top: 4px;
         }
 
+        .zoom-btn {
+            background: #2c2c2e;
+            color: #ffffff;
+            border: 1px solid #444;
+            border-radius: 4px;
+            padding: 3px 8px;
+            font-size: 0.75rem;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        .zoom-btn:active {
+            background: var(--accent-green);
+            color: #000;
+        }
+
         .timeline-wrapper {
             width: 100%;
             overflow-x: auto;
@@ -91,14 +106,14 @@
             -webkit-overflow-scrolling: touch;
         }
         .canvas-container {
-            height: 160px;
+            height: 165px;
             position: relative;
             min-width: 100%;
         }
         canvas {
             height: 100%;
             display: block;
-            background-color: #080808;
+            background-color: #0a0a0a;
         }
 
         .tab-container {
@@ -200,9 +215,14 @@
     </div>
 
     <div class="card">
-        <div style="display: flex; justify-content: space-between; font-size: 0.85rem;">
-            <span>音量タイムライン (指でスクロール可)</span>
-            <span id="liveStatus" style="color: var(--accent-green);">停止中</span>
+        <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem; flex-wrap: wrap; gap: 4px; margin-bottom: 6px;">
+            <span>音量タイムライン</span>
+            <div style="display: flex; align-items: center; gap: 6px;">
+                <button id="zoomOutBtn" class="zoom-btn">－ 縮小</button>
+                <span id="zoomLabel" style="font-size: 0.75rem; font-weight: bold; color: #00e676; min-width: 38px; text-align: center;">100%</span>
+                <button id="zoomInBtn" class="zoom-btn">＋ 拡大</button>
+                <span id="liveStatus" style="color: var(--accent-green); font-weight: bold; margin-left: 4px;">停止中</span>
+            </div>
         </div>
         <div class="timeline-wrapper" id="timelineWrapper">
             <div class="canvas-container" id="canvasContainer">
@@ -245,6 +265,7 @@
             let db;
             let activeDayIndex = 0;
             let lastSaveTime = 0;
+            let currentZoom = 1.0; // ズーム倍率 (0.5 ~ 4.0)
             
             let pcmRingBuffer = null;
             let pcmWriteIndex = 0;
@@ -264,6 +285,9 @@
             const toggleBtn = document.getElementById('toggleBtn');
             const testBtn = document.getElementById('testBtn');
             const clearBtn = document.getElementById('clearBtn');
+            const zoomInBtn = document.getElementById('zoomInBtn');
+            const zoomOutBtn = document.getElementById('zoomOutBtn');
+            const zoomLabel = document.getElementById('zoomLabel');
             const liveStatus = document.getElementById('liveStatus');
             const wakeLockStatus = document.getElementById('wakeLockStatus');
             const canvas = document.getElementById('timelineCanvas');
@@ -345,6 +369,23 @@
                 tx.objectStore('events').delete(id);
             }
 
+            // --- 拡大・縮小処理 ---
+            zoomInBtn.addEventListener('click', () => {
+                if (currentZoom < 4.0) {
+                    currentZoom = parseFloat((currentZoom + 0.5).toFixed(1));
+                    zoomLabel.innerText = `${Math.round(currentZoom * 100)}%`;
+                    resizeCanvas();
+                }
+            });
+
+            zoomOutBtn.addEventListener('click', () => {
+                if (currentZoom > 0.5) {
+                    currentZoom = parseFloat((currentZoom - 0.5).toFixed(1));
+                    zoomLabel.innerText = `${Math.round(currentZoom * 100)}%`;
+                    resizeCanvas();
+                }
+            });
+
             clearBtn.addEventListener('click', () => {
                 if (confirm("過去3日分の保存音声ログとグラフデータをすべて削除しますか？")) {
                     if (!db) return;
@@ -383,14 +424,15 @@
                 });
             }
 
-            // メモリ上限を超えない安全なキャンバスリサイズ関数
+            // ズーム倍率対応キャンバスリサイズ関数
             function resizeCanvas() {
                 if (!canvas) return;
                 const minWidth = timelineWrapper.clientWidth;
                 
-                // 1データあたり3pxで計算するが、スマホのCanvas描画限界（白抜けの原因）を防ぐため最大2000pxに上限を設定
-                const calculatedWidth = Math.min(2000, Math.max(minWidth, timelineData.length * 3));
-                const dpr = Math.min(window.devicePixelRatio || 1, 2); // DPRも2以下に制御
+                // 1データあたりの幅 (標準4px * 倍率)
+                const basePx = 4 * currentZoom;
+                const calculatedWidth = Math.min(8000, Math.max(minWidth, timelineData.length * basePx));
+                const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
                 canvasContainer.style.width = calculatedWidth + 'px';
                 canvas.width = calculatedWidth * dpr;
@@ -639,48 +681,67 @@
                 document.getElementById('summarySnoreRatio').innerText = `${ratio} %`;
             }
 
-            // 安全描画（背景黒固定・ステップ幅自動補正）
+            // 高コントラスト＆くっきり時刻表記の描画ロジック
             function drawTimeline() {
                 const w = canvas.width;
                 const h = canvas.height;
+                const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
-                // 背景クリア＆黒塗りつぶし
-                ctx.fillStyle = '#080808';
+                // 暗い背景
+                ctx.fillStyle = '#0a0a0a';
                 ctx.fillRect(0, 0, w, h);
 
                 if (timelineData.length === 0) return;
 
                 const step = w / Math.max(timelineData.length, 1);
-                const dpr = Math.min(window.devicePixelRatio || 1, 2);
-                const graphHeight = h - (25 * dpr);
+                const textHeight = 28 * dpr;
+                const graphHeight = h - textHeight;
+
+                // 参照ガイドライン（横線）
+                ctx.strokeStyle = '#222222';
+                ctx.lineWidth = 1 * dpr;
+                for (let db = -80; db <= -20; db += 20) {
+                    const lineY = graphHeight - (((db + 100) / 100) * graphHeight);
+                    ctx.beginPath();
+                    ctx.moveTo(0, lineY);
+                    ctx.lineTo(w, lineY);
+                    ctx.stroke();
+                }
 
                 for (let i = 0; i < timelineData.length; i++) {
                     const item = timelineData[i];
-                    const barHeight = ((item.db + 100) / 100) * graphHeight;
+                    const barHeight = Math.max(2, ((item.db + 100) / 100) * graphHeight);
                     const x = i * step;
                     const y = graphHeight - barHeight;
-                    const barWidth = Math.max(1, step - 0.5);
+                    const barWidth = Math.max(1.5, step - 0.5);
 
+                    // 高発色カラー
                     if (item.type === 'alert') {
-                        ctx.fillStyle = '#ff5252';       
-                        ctx.fillRect(x, 0, Math.max(2 * dpr, step), graphHeight);
+                        ctx.fillStyle = '#ff1744'; // 鮮烈な赤
+                        ctx.fillRect(x, 0, Math.max(3 * dpr, step), graphHeight);
                     } else if (item.type === 'snore') {
-                        ctx.fillStyle = '#ffb300';  
+                        ctx.fillStyle = '#ffab00'; // 鮮やかなアンバーオレンジ
                         ctx.fillRect(x, y, barWidth, barHeight);
                     } else if (item.type === 'silence') {
-                        ctx.fillStyle = '#333333';
+                        ctx.fillStyle = '#4a5568'; // 見やすい青みのある明るめグレー
                         ctx.fillRect(x, y, barWidth, barHeight);
                     } else {
-                        ctx.fillStyle = '#00e676';                             
+                        ctx.fillStyle = '#00ff7f'; // 鮮やかなスプリンググリーン
                         ctx.fillRect(x, y, barWidth, barHeight);
                     }
 
-                    // データ数に応じた目盛り間隔の動的計算
-                    const labelInterval = Math.max(12, Math.floor(timelineData.length / 8));
-                    if (i % labelInterval === 0) {
-                        ctx.fillStyle = '#aaaaaa';
-                        ctx.font = `${10 * dpr}px sans-serif`;
-                        ctx.fillText(item.timeStr, x, h - (5 * dpr));
+                    // 目盛り線と時刻テキスト（純白 bold で可読性大幅UP）
+                    const labelInterval = Math.max(6, Math.floor(70 / Math.max(1, step / dpr)));
+                    if (i % Math.floor(labelInterval) === 0) {
+                        ctx.strokeStyle = '#555555';
+                        ctx.beginPath();
+                        ctx.moveTo(x, graphHeight);
+                        ctx.lineTo(x, graphHeight + (4 * dpr));
+                        ctx.stroke();
+
+                        ctx.fillStyle = '#ffffff';
+                        ctx.font = `bold ${11 * dpr}px sans-serif`;
+                        ctx.fillText(item.timeStr, x + (2 * dpr), h - (6 * dpr));
                     }
                 }
             }
